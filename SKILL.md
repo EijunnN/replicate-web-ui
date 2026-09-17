@@ -115,6 +115,7 @@ instead of viewport breakpoints, and giving the user a full-page route.
 ```bash
 node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
 node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440 --dark
+node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440 --dark --threshold 4
 node dom-diff.mjs --original <url> --replica <url>
 cp states.example.mjs states.config.mjs   # edit URLs and actions
 node states.mjs   --config states.config.mjs
@@ -154,8 +155,11 @@ Tell the user, in their language:
 - **Stale local installs.** A package with its own `node_modules`/lockfile inside a
   workspace kept resolving the old version after `bun add`. Check the version the
   *app* resolves, not the one in `package.json`.
-- **Diff thresholds hide surfaces.** A 0.985 vs 1.0 background is 5 levels apart and
-  passes a threshold of 40. Measure computed backgrounds of panels, sheets and cards.
+- **Diff thresholds hide surfaces and glows.** A 0.985 vs 1.0 background is 5 levels
+  apart and passes a threshold of 40; so did a missing dark-mode text glow. Rerun with
+  `--threshold 4` and measure computed backgrounds, gradients and shadows in both themes.
+- **`theme()` bakes in the host's light value.** Rewrite `theme(--color-x/.4)` in
+  arbitrary values as `--theme(...)`, or the dark variant uses the light color.
 - **False "0 px".** A hover at the wrong coordinates does nothing on both pages and
   diffs clean. `states.mjs` flags actions with no visible effect; still crop one or
   two states to see the effect with your own eyes.

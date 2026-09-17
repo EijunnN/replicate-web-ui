@@ -85,6 +85,15 @@ emits `var(--color-background)`.
 - Include tokens used only by variants: the mobile sidebar sheet used `--sidebar`
   (0.985) while the desktop rail used `--background`.
 
+- **`theme()` vs `--theme()` in arbitrary values.** The original may write
+  `dark:text-shadow-[0_0px_25px_theme(--color-foreground/.4)]`. Tailwind's legacy
+  `theme()` inlines the host's *value* of the token when the host declares it with a
+  plain `@theme`, so the replica got the light foreground baked in and its dark glow
+  turned into a dark shadow on a dark background (invisible). `--theme(...)` keeps a
+  `var()`, which the scoped dark tokens can switch. Rewrite `theme(` as `--theme(`
+  (or `color-mix(in_oklab,var(--x)_40%,transparent)`) and check the computed value in
+  dark mode.
+
 ## 4. Icons, fonts, radii
 
 - Paste icon markup from `icons.mjs`; don't import a newer icon package version whose

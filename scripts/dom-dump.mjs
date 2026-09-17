@@ -53,11 +53,13 @@ const html = await page.evaluate((selector) => {
         const children = [...element.children];
         let start = 0;
         while (start < children.length) {
-          // Same tag, class and inner structure. Per-item attributes (labels, inline
-          // styles, ids) are ignored, so 168 heatmap cells collapse while sparkline
-          // columns with different segment counts stay separate.
+          // Same tag, attributes and inner structure. Per-item attributes (labels,
+          // inline styles, ids) are ignored, so 168 heatmap cells collapse while
+          // sparkline columns with different segment counts and SVG paths with
+          // different `d` stay separate.
+          const perItem = /^(id|title|style|tabindex|aria-[\w-]+|data-state)$/;
           const signature = (node) =>
-            `${node.tagName}|${node.getAttribute("class") ?? ""}|${node.innerHTML.replace(/\s(id|title|style|tabindex|aria-[\w-]+|data-state)="[^"]*"/g, "")}`;
+            `${node.tagName}|${[...node.attributes].filter((a) => !perItem.test(a.name)).map((a) => `${a.name}=${a.value}`).join(" ")}|${node.innerHTML.replace(/\s(id|title|style|tabindex|aria-[\w-]+|data-state)="[^"]*"/g, "")}`;
           let end = start;
           while (end + 1 < children.length && signature(children[end + 1]) === signature(children[start])) end++;
           const run = end - start + 1;

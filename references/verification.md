@@ -77,8 +77,12 @@ Examples from the dashboard replica, each found this way:
 ## 4. Traps: false passes
 
 - **Threshold blindness.** The pixel threshold (40) ignores antialiasing noise, and
-  with it near-white surface differences (0.985 vs 1.0 is 5 levels). For panels,
-  sheets, cards and overlays, compare `background-color` with `measure.mjs`.
+  with it near-white surface differences (0.985 vs 1.0 is 5 levels), hover fills
+  (white → 0.97) and soft effects: a 25px text glow at 40% alpha in dark mode passed at
+  0 px while it was missing. When compare and states are clean, run them again with
+  `--threshold 4`, and read the computed values that pixels barely show:
+  `background-color`, `background-image`, `text-shadow`, `box-shadow`, `filter`, in
+  light *and* dark, at rest *and* hovered.
 - **Actions that did nothing.** A hover at a coordinate with no target gives 0 px on
   both. Trust `states.mjs` warnings and crop a couple of states to see the effect.
 - **Unsettled animations.** Two pages captured mid-animation can match by accident or
