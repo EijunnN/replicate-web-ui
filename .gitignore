@@ -1,0 +1,7 @@
+node_modules/
+capture/
+modules/
+cmp/
+states/
+*.png
+states.config.mjs

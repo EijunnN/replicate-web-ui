@@ -1,0 +1,10 @@
+{
+  "name": "replicate-web-ui-workspace",
+  "private": true,
+  "description": "Dependencies for the replicate-web-ui scripts. Copy this folder into a scratch workspace and npm install.",
+  "dependencies": {
+    "js-beautify": "^1.15.0",
+    "playwright": "^1.57.0",
+    "pngjs": "^7.0.0"
+  }
+}
