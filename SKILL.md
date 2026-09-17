@@ -158,6 +158,10 @@ Tell the user, in their language:
 - **Diff thresholds hide surfaces and glows.** A 0.985 vs 1.0 background is 5 levels
   apart and passes a threshold of 40; so did a missing dark-mode text glow. Rerun with
   `--threshold 4` and measure computed backgrounds, gradients and shadows in both themes.
+- **The user's browser is not a clean browser.** A difference the user sees but the
+  scripts don't can come from preferences the original saved in their browser (a
+  design-system style made the same buttons 40px instead of 36px). Get their DevTools
+  measurements, find the storage keys in the bundle, load them and measure again.
 - **`theme()` bakes in the host's light value.** Rewrite `theme(--color-x/.4)` in
   arbitrary values as `--theme(...)`, or the dark variant uses the light color.
 - **False "0 px".** A hover at the wrong coordinates does nothing on both pages and

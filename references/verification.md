@@ -107,6 +107,18 @@ Examples from the dashboard replica, each found this way:
 - **Antialiasing on animated layers.** Text inside something that just finished a
   transform animation can rasterize differently. Identical boxes and colors in
   `measure.mjs` confirm it is not a design difference.
+- **Preferences saved in the user's browser.** The scripts use a clean browser, so
+  they see the original's defaults. The user's browser may carry saved site settings
+  (a design-system style, font, radius, density, theme, locale, an A/B flag) in
+  `localStorage` or cookies. A template gallery rendered the same block with 40px
+  buttons for the user (style "vega" saved) and 36px for the scripts (default "nova");
+  every diff was 0 px and the user was still right about what they saw. When the user
+  reports a difference you cannot reproduce: ask for DevTools numbers (box size of the
+  element, viewport, zoom), check the site's storage keys in its bundle (search for
+  `persist`, `localStorage`, `document.cookie`), then set those values in Playwright
+  (`localStorage.setItem` before a reload, or `context.addCookies`) and measure again.
+  Replicate the default unless the user asks for their variant, and tell them which one
+  the replica follows.
 - **Color serialization.** `oklch(0.145 0 0)` vs `lab(2.75 0 0)` is the same color;
   compare normalized values (`dom-diff.mjs` does).
 
