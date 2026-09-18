@@ -26,6 +26,18 @@ One chunk frequently holds the whole feature (the dashboard's sidebar, header,
 cards and charts were all in one 50 KB chunk). Read that module file end to end
 before extracting more; it tells you which pieces are local and which are imported.
 
+On a React Server Components page (Next.js App Router), start one step earlier:
+
+```bash
+node rsc-refs.mjs capture/html/<page>.html
+```
+
+The HTML streams the RSC payload in `self.__next_f.push([1,"…"])` strings; its
+`NN:I[moduleId,[chunks],"Export"]` lines are exactly the client components the page
+mounts, with the chunk each lives in. That turns "which of these 200 modules matter"
+into a list of five or six, and the rest of the payload holds the props the server
+passed them — often the page's data, already in order.
+
 Strings not found in any module are server-rendered (see section 4) or live in a
 lazy chunk that loads only after an interaction. For the latter, open the overlay or
 switch the tab in a Playwright session with `capture.mjs`-style response logging, or

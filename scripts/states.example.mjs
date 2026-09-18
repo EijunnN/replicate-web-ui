@@ -2,6 +2,7 @@
 // Prefer semantic locators (aria-label, text) over coordinates: they survive layout
 // differences and fail loudly when the replica lacks the control.
 // `fullHeight: true` makes the viewport as tall as the page, for states below the fold.
+// computed-diff.mjs reads the same file, and uses the *Root / ignore* fields below.
 export default {
   original: "https://example.com/dashboard",
   replica: "http://localhost:3000/view/dashboard",
@@ -9,6 +10,11 @@ export default {
   viewport: { width: 1440, height: 900 },
   wait: 3000, // entry animations (charts, springs) must finish before acting
   threshold: 40,
+  // computed-diff.mjs only: where each block starts, and host chrome with no counterpart.
+  // originalRoot: "body > div.min-h-screen",
+  // replicaRoot: '[data-slot="dashboard"] > div',
+  // ignoreElements: "noscript, section[aria-label*='Notifications']",
+  // prep: "document.head.insertAdjacentHTML('beforeend','<style>.marquee{transform:none!important}</style>')", // both pages
   // replicaPrep: "document.querySelector('#banner')?.remove()",
   states: [
     { name: "sidebar-hover", run: async (page) => { await page.mouse.move(20, 300, { steps: 4 }); await page.waitForTimeout(900); } },

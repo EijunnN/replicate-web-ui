@@ -3,7 +3,10 @@
 // sidebars, sticky headers and h-svh app shells line up without scrolling.
 //
 //   node compare.mjs --original URL --replica URL --out cmp [--widths 1440,1280,1024,800,390]
-//        [--wait 3500] [--threshold 40] [--dark] [--replica-prep "document.body.style.zoom=1"]
+//        [--wait 3500] [--threshold 40] [--dark] [--prep "<js for both pages>"] [--replica-prep "<js>"]
+//
+// --prep runs on both pages after load. Use it to freeze what never settles, e.g. an
+// infinite slider: --prep "document.head.insertAdjacentHTML('beforeend','<style>.marquee{transform:none!important}</style>')"
 //
 // Prints diff pixels per width plus the hottest 40px cells ("x,y:px"). Open
 // cmp/diff-<w>.png (differences in red) and use png-tools.mjs pair to zoom a cell.
@@ -19,12 +22,13 @@ const suffix = dark ? "-dark" : "";
 const browser = await launch();
 
 for (const width of widths) {
-  const original = await openPage(browser, args.original, { width, fullHeight: true, wait, dark });
+  const original = await openPage(browser, args.original, { width, fullHeight: true, wait, dark, prep: args.prep });
   const originalShot = path.join(out, `original-${width}${suffix}.png`);
   await original.page.screenshot({ path: originalShot });
   await original.page.close();
 
-  const replica = await openPage(browser, args.replica, { width, fullHeight: original.height, wait, dark, prep: args["replica-prep"] });
+  const replicaPrep = [args.prep, args["replica-prep"]].filter(Boolean).join(";\n");
+  const replica = await openPage(browser, args.replica, { width, fullHeight: original.height, wait, dark, prep: replicaPrep || undefined });
   const replicaHeight = await replica.page.evaluate(() => document.documentElement.scrollHeight);
   const replicaShot = path.join(out, `replica-${width}${suffix}.png`);
   await replica.page.screenshot({ path: replicaShot });

@@ -84,6 +84,30 @@ emits `var(--color-background)`.
   For those, use arbitrary values (`bg-(--primary)`, `border-(--input)/30`).
 - Include tokens used only by variants: the mobile sidebar sheet used `--sidebar`
   (0.985) while the desktop rail used `--background`.
+- **Scope Tailwind's own scales too, not just the palette.** `ease-out`, `rounded-md`,
+  `text-sm`, `duration-*` and the rest compile to `var(--ease-out)`, `var(--radius-md)`
+  … which resolve *on the element*. A host that declares its own values in `@theme`
+  (one component package exporting `--ease-out: cubic-bezier(.23,1,.32,1)` is enough)
+  changes the block's animation curves and corner radii with no class difference and no
+  screenshot difference until that exact state is on screen. Redeclare the scales the
+  block uses on its root, with the original's values:
+
+  ```css
+  [data-slot="my-block"] {
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-out: cubic-bezier(0, 0, 0.2, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --radius-sm: calc(0.625rem - 4px); --radius-md: calc(0.625rem - 2px);
+    --radius-lg: 0.625rem;             --radius-xl: calc(0.625rem + 4px);
+  }
+  ```
+
+  `theme-leak.mjs` lists every scale the two pages disagree on.
+- **Carry the original page's base rules.** The block inherits them on the original
+  site and loses them in yours: `button:not(:disabled), [role="button"]:not(:disabled)
+  { cursor: pointer }`, `font-synthesis-weight: none`, `text-rendering:
+  optimizeLegibility`. `css-rules.mjs --decl "cursor: pointer|font-synthesis"` finds
+  them; scope them to the block root.
 
 - **`theme()` vs `--theme()` in arbitrary values.** The original may write
   `dark:text-shadow-[0_0px_25px_theme(--color-foreground/.4)]`. Tailwind's legacy
@@ -130,6 +154,17 @@ root  relative isolate flex size-full overflow-hidden @container   ← fills its
 - **Dialogs, sheets:** portal into the block root and position `absolute inset-0`, so
   they cover the block (a fixed element inside the sticky header would only cover the
   header). Fall back to `document.body` + `fixed` when rendered outside the root.
+- **A portal escapes the block's scope.** Whatever lands on `<body>` inherits the
+  *host's* `color`, fonts and tokens. In light mode the two foregrounds often agree and
+  nothing looks wrong; in dark mode the layer's text is a few levels off. Wrap the
+  portal content in `<div className="contents font-sans text-foreground antialiased"
+  data-slot="my-block">` — `display: contents` keeps the layout, `data-slot` re-enters
+  the token scope, and the classes restore what inheritance lost.
+- **A size container traps `position: fixed`.** `container-type: inline-size` creates
+  layout containment, so a fixed overlay inside the block anchors to the block, not the
+  viewport. On a full page, portal the layer to `<body>` (with the wrapper above); when
+  the block scrolls inside an element, portal to the root and position it absolutely
+  from the scroller's `scrollTop`. Also translate `w-screen` to `w-[100cqw]`.
 - **Popovers and menus:** `absolute top-full right-0` inside a `relative flex`
   wrapper. `flex`, not block: a block wrapper around an `inline-flex` trigger adds a
   line box and shifts the trigger ~1px.
@@ -158,6 +193,19 @@ container queries on the block root with the same pixel thresholds:
 
 Put `@container` on the root that spans the full width (sidebar included) so a
 full-page render hits the same breakpoints as the original viewport.
+
+**The container must have no padding.** A container query measures the content box,
+so `@container px-4` at a 1024px viewport queries 992px and the block drops to its
+smaller layout exactly at the breakpoint the original still shows the wide one. Keep
+the padding on an inner element:
+
+```jsx
+<div className="@container" data-slot="my-block">
+  <div className="px-4">…</div>
+</div>
+```
+
+That is why the width list includes both sides of each breakpoint (1024 *and* 1023).
 
 Then add a full-page route for the block (e.g. `/view/<collection>/<slug>` rendering
 the block in `h-svh`) and an "Open in new tab" link from the docs. Tell the user why

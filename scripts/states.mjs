@@ -7,6 +7,7 @@
 //
 // The config is an ES module; copy states.example.mjs and edit it. States with
 // `static: true` (dark mode, a viewport size) skip the "did the action do anything" check.
+// `prep` (both pages) and `replicaPrep` run after load, e.g. to freeze an infinite slider.
 import { pathToFileURL } from "node:url";
 import { diffPngs, ensureDir, formatDiff, launch, need, openPage, parseArgs, path } from "./lib.mjs";
 
@@ -25,7 +26,7 @@ async function shoot(url, state, file, withAction, isReplica) {
     fullHeight: state.fullHeight ?? false,
     wait: config.wait ?? 3000,
     dark: !!state.dark,
-    prep: isReplica ? config.replicaPrep : undefined,
+    prep: [config.prep, isReplica ? config.replicaPrep : undefined].filter(Boolean).join(";") || undefined,
   });
   await page.mouse.move(state.restX ?? viewport.width / 2, state.restY ?? 5);
   if (withAction && state.run) await state.run(page);

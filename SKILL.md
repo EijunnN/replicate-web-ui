@@ -49,13 +49,16 @@ on unpkg lists the revisions). Every script prints its usage in its header comme
 |---|---|
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Split Turbopack/webpack chunks into modules; find them by visible text; follow imports |
+| `rsc-refs.mjs` | Which client components an RSC page mounts, and their module ids |
 | `dom-dump.mjs` | Readable rendered DOM of a region, optionally after opening overlays |
-| `css-rules.mjs` | CSS rules from the live CSSOM by selector regex, with @layer/@media context |
+| `css-rules.mjs` | CSS rules from the live CSSOM by selector regex (`--match`) or by declaration (`--decl`) |
 | `tokens.mjs` | Custom properties and typography, light and dark |
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
 | `measure.mjs` | Boxes and computed styles for a selector, original vs replica, after actions |
 | `compare.mjs` | Full-page pixel diff at several widths |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
+| `computed-diff.mjs` | *Every* computed property of every element, per state — sees what pixels cannot |
+| `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
 | `states.mjs` + `states.example.mjs` | Interaction matrix: same actions on both pages, diffed, with "did anything happen" checks |
 | `png-tools.mjs` | Diff two PNGs; zoomed side-by-side crop of a hot cell |
 | `fingerprint-version.mjs` | Which npm versions of a library contain a code fingerprint |
@@ -84,6 +87,9 @@ headless Playwright session and screenshot.
 
 ### 3. Extract, part by part
 
+- **Which modules to read at all** (on a React Server Components page) →
+  `rsc-refs.mjs <capture/html/page.html>`: the streamed payload names every client
+  component the page mounts, so you grep a handful of modules instead of hundreds.
 - **Logic, data, animation** → `bundle-modules.mjs --grep "<text visible in that part>" --deps`.
   Text found in no module means that part is server-rendered: use the DOM instead.
   Read `references/bundle-forensics.md` for chunk formats, import following and
@@ -113,13 +119,24 @@ instead of viewport breakpoints, and giving the user a full-page route.
 ### 5. Verify until the diffs are zero or explained
 
 ```bash
-node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
-node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440 --dark
-node compare.mjs  --original <url> --replica <url> --out cmp --widths 1440 --dark --threshold 4
-node dom-diff.mjs --original <url> --replica <url>
+node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
+node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440 --dark
+node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440 --dark --threshold 4
+node dom-diff.mjs     --original <url> --replica <url>
+node theme-leak.mjs   --original <url> --replica <url> --replica-root '[data-slot="block"]'
 cp states.example.mjs states.config.mjs   # edit URLs and actions
-node states.mjs   --config states.config.mjs
+node states.mjs       --config states.config.mjs
+node computed-diff.mjs --config states.config.mjs
 ```
+
+Diff the widths on *both* sides of each breakpoint (1024 and 1023, 768 and 767): a
+container query that is off by the width of a padding only shows at the edge.
+
+`computed-diff.mjs` is what turns "the screenshots match" into "nothing differs".
+Pixels cannot see a `cursor`, an easing curve, a transition duration, a color that only
+appears on hover, or a 0.1px box. Run it at rest, with every overlay open, in dark mode
+and at mobile width; it is normal for the first run to print host chrome as a count
+mismatch, which `ignoreElements` removes.
 
 For every non-zero result: zoom the hot cell with `png-tools.mjs pair`, then
 `measure.mjs` the element on both pages, then read the relevant source or library
@@ -130,7 +147,9 @@ produced false passes and false failures.
 A residual difference is acceptable only when you can name its cause and it is not a
 design difference: a race inside the original (a throttled `mousemove` landing after
 `mouseleave`), hover that the browser did not recompute under a stationary pointer,
-antialiasing on a layer that was just animated.
+antialiasing on a layer that was just animated. Prove that last one instead of assuming
+it: if forcing a repaint clears it, if it moves to the *original* on another run, and if
+the computed styles are identical, it is Chromium's raster cache, not your CSS.
 
 ### 6. Deliver
 
@@ -166,7 +185,26 @@ Tell the user, in their language:
   arbitrary values as `--theme(...)`, or the dark variant uses the light color.
 - **False "0 px".** A hover at the wrong coordinates does nothing on both pages and
   diffs clean. `states.mjs` flags actions with no visible effect; still crop one or
-  two states to see the effect with your own eyes.
+  two states to see the effect with your own eyes. When an action legitimately changes
+  nothing (a trigger whose hover background a utility cancels, a page too short to
+  scroll), confirm it by reading the computed value, then say so in the report.
+- **The host page's base layer is part of the block.** The original inherits rules that
+  belong to its page, not to the component: `button:not(:disabled) { cursor: pointer }`,
+  `body { font-synthesis-weight: none; text-rendering: optimizeLegibility }`. No
+  screenshot shows a cursor. Find them with `css-rules.mjs --decl` and re-declare them
+  scoped to the block root.
+- **The host theme redefines Tailwind's scales.** A project that sets `--ease-out` or
+  `--radius-lg` in its own `@theme` changes what `ease-out` and `rounded-md` mean inside
+  your block: same classes, different animation curve and corners. `theme-leak.mjs`
+  lists them; redeclare the scales on the block root.
+- **A portal leaves the block's scope.** An overlay portaled to `<body>` stops
+  inheriting the root's `color`, `font-*` and tokens, and picks up the host's instead —
+  visible only in dark mode, where the two foregrounds differ. Give the portal wrapper
+  the same classes and `data-slot` as the root.
+- **Infinite animations make every diff noise.** Freeze them on both pages with
+  `--prep` / `config.prep` (a CSS override that pins the moving element), then verify
+  the motion separately: measure the transform over time and compare speed, direction
+  and the hover speed change.
 - **Viewport vs container.** The user viewed the replica inside a 748px docs preview
   and concluded the hover sidebar was missing. Use container queries in the block and
   provide a full-page route.

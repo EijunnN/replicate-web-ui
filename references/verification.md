@@ -1,18 +1,18 @@
 # Verification playbook
 
-The replica is finished when three independent checks agree, or every remaining
+The replica is finished when four independent checks agree, or every remaining
 difference has a named cause that is not a design difference.
 
 ## Contents
 
-1. The three checks
+1. The four checks
 2. Choosing states
 3. Investigating a difference
 4. Traps: false passes
 5. Traps: false failures
 6. Reporting
 
-## 1. The three checks
+## 1. The four checks
 
 **Pixels, whole page, several widths** (`compare.mjs`). Both pages get the viewport
 of the original's full height, so nothing scrolls and fixed/sticky elements line up.
@@ -30,6 +30,20 @@ visually ("5.64K  orders" vs "5.64K orders"), aria-labels you added.
 **States** (`states.mjs`). The same actions on both pages, diffed. Each state is also
 compared with the untouched page, and a state whose action changed nothing is flagged.
 That catches coordinates that miss their target, which otherwise pass as "0 px".
+
+**Computed styles** (`computed-diff.mjs`). Every computed property of every element,
+in each state of the same config. This is the only check that sees properties with no
+pixels: `cursor`, an easing curve or duration, `font-synthesis`, a hover color on an
+element the pointer is not on, a 0.1px box. On a finished-looking hero it still found
+three real differences — missing `cursor: pointer` from the host page's base layer, an
+`--ease-out` the host theme redefined, and a portaled menu inheriting the host's dark
+foreground — none of which any screenshot could show. Run it at rest, with each overlay
+open, in dark, and at mobile width.
+
+When it reports a count mismatch, align the trees before reading the diffs: set
+`originalRoot`/`replicaRoot` to each block's root, and put host chrome that has no
+counterpart (`noscript`, a toaster region, analytics nodes) in `ignoreElements`.
+A single extra element shifts every index after it and turns the report into noise.
 
 ## 2. Choosing states
 
@@ -88,6 +102,15 @@ Examples from the dashboard replica, each found this way:
 - **Unsettled animations.** Two pages captured mid-animation can match by accident or
   differ randomly. `capture.mjs` reports whether the page settled; wait past chart
   entry tweens (≈1.1s plus stagger) and springs.
+- **Infinite animations never settle.** A marquee, a spinner or a pulsing dot makes
+  every diff a lottery. Freeze both pages with `prep` (`compare.mjs --prep`,
+  `config.prep`) — a `<style>` that pins the moving element (`transform: none
+  !important`, `animation: none !important`) — and then verify the motion on its own:
+  sample the transform over a few seconds on both pages and compare speed, direction,
+  and how hovering changes it. A frozen slider that matches pixel for pixel can still
+  run at the wrong speed.
+- **Breakpoint edges.** Diff at the breakpoint and one pixel below it. A container that
+  carries padding shifts every query by that padding, and only the edge width shows it.
 - **Scroll position.** A replica that scrolls an inner container while the original
   scrolls the window can line up at the top and diverge below. Full-height viewports
   avoid it; `compare.mjs` notes document height mismatches.
@@ -106,7 +129,14 @@ Examples from the dashboard replica, each found this way:
   pixel before the screenshot if it matters.
 - **Antialiasing on animated layers.** Text inside something that just finished a
   transform animation can rasterize differently. Identical boxes and colors in
-  `measure.mjs` confirm it is not a design difference.
+  `measure.mjs` confirm it is not a design difference. One header that morphs on scroll
+  left a glyph a third of a pixel off after the spring settled, in the *same* 36 pixels
+  on every run — deterministic enough to look like a bug. Three things proved it was
+  Chromium's raster cache: `computed-diff.mjs` found no property difference anywhere in
+  the header, forcing a repaint (toggle a style, wait a frame) made the difference
+  vanish, and on the production build it moved to the original instead. Before claiming
+  a raster artifact, run those three; before assuming a real bug, remember that a
+  repeatable pixel count is not proof of one.
 - **Preferences saved in the user's browser.** The scripts use a clean browser, so
   they see the original's defaults. The user's browser may carry saved site settings
   (a design-system style, font, radius, density, theme, locale, an A/B flag) in
