@@ -1,11 +1,32 @@
 # Verification playbook
 
-The replica is finished when four independent checks agree, or every remaining
+The replica is finished when the independent checks agree, or every remaining
 difference has a named cause that is not a design difference.
+
+`verify.mjs --config replica.config.mjs` runs all of them from one config and prints a
+short report with a verdict; the scripts below are what it runs, and each still works on
+its own (`--only name,other`, `--refresh`, `--json file`; exit code 1 when something
+differs). Read the report, and open `<out>/logs/<check>.log` only for the item you are
+fixing: the full output of one computed-diff run is thousands of lines.
+
+| Verdict | Means |
+|---|---|
+| `FAIL` | something differs, or a check did not finish (`ERROR`: read its log) |
+| `LOOP CLEAN` | `--changed` / `--only`: what was rerun is clean. Not a pass: run the full verification |
+| `PASS on a cached original` | every check, original from cache. Run `--final` before delivering |
+| `PASS (final …)` | every check, original recaptured. The one you deliver on |
+
+**How a pixel diff decides.** Anything over the threshold (40) fails. The same screenshots
+are also read at a threshold of 4, and those faint pixels come in two kinds: a surface, a
+gradient or a glow *fills* the cells it touches (≥10% of a 40px cell) and fails; edge
+antialiasing is a handful of pixels along a curve or a glyph, and is counted as "sparse"
+without failing. A thin faint line — a border five levels off — is sparse too, which is
+why the pixel checks are only trusted together with `computed-diff.mjs`: it reads that
+border's color directly.
 
 ## Contents
 
-1. The four checks
+1. The checks
 2. Choosing states
 3. Investigating a difference
 4. Traps: false passes
@@ -13,7 +34,7 @@ difference has a named cause that is not a design difference.
 6. Keeping the loop fast
 7. Reporting
 
-## 1. The four checks
+## 1. The checks
 
 **Pixels, whole page, several widths** (`compare.mjs`). Both pages get the viewport
 of the original's full height, so nothing scrolls and fixed/sticky elements line up.
@@ -25,10 +46,16 @@ Use at least the widths around each breakpoint the original has: 1440, 1280, 102
 gallery or docs page, the page around it is not part of the replica: screenshot the
 component's own elements on both sides instead (a row of triggers, each open panel).
 Three settings make that comparison honest: `hideChrome` (on by default) hides the host's
-fixed navbar so it stops painting over the capture, `matchWidth` caps the replica's
-wrapper at the width the original's element has at that viewport (a full-width section
-against the same section in a narrower docs column), and `alignPhase` (on by default)
-matches the sub-pixel offset the two pages leave the element at.
+fixed navbar so it stops painting over the capture, `matchWidth` caps the replica at the
+width the original's *block* has at that viewport (a full-width section against the same
+section in a narrower docs column; `widthAnchor` names the ancestor to cap), and position
+alignment (on by default) puts the replica's element at the same document coordinates as
+the original's, fraction included. `phaseAnchor` names the ancestor to move: when the
+original sits in a bordered or clipped frame, give the replica's page the same frame and
+move that, or the block paints one row off inside an integer-aligned frame.
+A case with a `run` is placed *before* its action (by the original's resting box), because
+moving the page after a hover takes the element out from under the pointer; and it is shot
+before and after, so an action that changed nothing is flagged.
 Two things the element's box leaves out, check separately: anything painted outside it
 (a popover arrow sits above the panel) and where it sits relative to the control that
 opened it — measure both boxes on each page and compare the offset, not the coordinates.
@@ -127,8 +154,83 @@ Examples from the dashboard replica, each found this way:
 - **Scroll position.** A replica that scrolls an inner container while the original
   scrolls the window can line up at the top and diverge below. Full-height viewports
   avoid it; `compare.mjs` notes document height mismatches.
+- **Reveals that never fired.** Sections that enter with `whileInView` / an
+  IntersectionObserver start at `opacity: 0`. In a 900px viewport everything below the
+  fold is invisible on *both* pages, and a block that is 3000px tall diffs clean while
+  most of it was never drawn. Give those cases a viewport taller than the page
+  (`viewport: { width: 1440, height: 7000 }`), so every reveal fires without scrolling.
+- **Loops driven by state, not CSS.** A log that replays every 5 seconds re-mounts its
+  rows with a `setInterval` and animates them with inline styles; `animation: none` does
+  nothing to it, and the capture lands mid-replay on one page and not the other. Pin its
+  end state in `prep` — inline styles lose to `!important`
+  (`.log *{opacity:1!important;transform:none!important}`) — and compare the timing in
+  the source (interval, stagger, spring) instead.
+- **A canvas driven by time** (a WebGL gradient) never matches a second capture of
+  itself. Hide it on both pages (`canvas{visibility:hidden!important}`), which leaves it
+  unverified by pixels: check the shader and its uniforms against the source, look at one
+  side-by-side crop, and say so in the report.
+- **Attributes are not computed styles.** `computed-diff.mjs` cannot see an `<img src>`, an
+  `href` or an SVG path; only pixels do. A wrong avatar seed passed every computed check.
+  Keep a pixel case over every image and icon.
 
 ## 5. Traps: false failures
+
+- **A dev server is not the build.** It serializes the same CSS differently (`150ms` vs
+  `.15s`, `rgb(0 0 0 / 0.15)` vs `#00000026`, `calc(2.25 / 1.875)` vs `1.2`) and adds
+  overlays. `theme-leak.mjs` normalizes those spellings, but verify against a production
+  build (`vite build && vite preview`, `next build && next start`) anyway.
+- **Tile alignment.** Chromium rasterizes in tiles laid out from the document origin, and
+  an SVG image or a curve that lands on another part of a tile antialiases differently.
+  A replica diffed against *itself* 396px lower on the page showed 16 px over the
+  threshold and 420 faint ones, all on avatar edges; with the phase aligned and the
+  position not, the same pixels showed up against the original. `element-diff.mjs` now
+  aligns the full document position; if a block still shows sparse edge noise, run that
+  self-test (same page, `main{padding-top:+396px}`) before hunting a cause in the CSS.
+- **Text inside a composited layer.** `will-change: transform` on every word of a headline,
+  a ticker's digit column, a `backdrop-filter` card: each is its own layer, rasterized at
+  its own sub-pixel origin, which the page around the block decides. Boxes and computed
+  styles identical to four decimals, every glyph different — thousands of pixels. Put the
+  same mode on both sides *for the pixel checks only* (`elements.prep` overrides the
+  top-level `prep`): `[class*=will-change]{will-change:auto!important}`
+  `[class*=backdrop-blur]{backdrop-filter:none!important}`. The diff going to 0 is the proof;
+  computed-diff keeps comparing the real `will-change` and `backdrop-filter`. These layers
+  are not even stable against themselves: the same page loaded twice differed by 500 px on
+  a spring-revealed headline until they were flattened. In the whole-page mode the
+  top-level `prep` reaches computed-diff too, so run `--only computed` once without it.
+- **The harness is part of the comparison.** The original shows a block inside a gallery:
+  second on the page, in a 1px frame, in a column, as a flex item, over the gallery's page
+  colour. The replica's own route shows it first, edge to edge, as a block child, over the
+  host's colour. Every one of those read as a difference, and none is the component's:
+  - position in the page → `replicaIndex` / `replicaSelector` (on the config or on a case);
+  - frame, column and surface → build them in `replicaPrep`: wrap the block in a
+    `data-frame` div with the original's radius and a 1px ring, cap its parent at the
+    original's column width, set `document.body.style.background` to the original's page
+    colour (it shows through the frame's rounded corners and the last fractional row:
+    thousands of faint pixels along the edges, none inside);
+  - layout context → if the original's wrapper is `display: flex`, make the frame flex too,
+    or the root reports `min-width: auto | 0px`;
+  - a surface the package paints on purpose (the original is transparent over its page) →
+    clear it in `replicaPrep` for the comparison and say so in the report.
+  `theme-leak.mjs` also needs both roots (`originalRoot`, `replicaRoot`) once the replica
+  lives in a host with its own theme: resolved on `<body>` it reports the host's scales.
+- **Selectors that survive the port.** `a.bg-primary` stopped matching the moment the port
+  wrote `bg-(--primary)`. Select by structure, role or text (`a.h-12:has(svg)`,
+  `getByRole("button", { name })`), not by a colour utility.
+- **Text node boundaries.** `["About ", brand]` is two text nodes; `"About beUI"` is one
+  and measures 1/64px narrower, which moves every glyph after it a fraction and scatters
+  hundreds of faint pixels over a page that "did not change". computed-diff names the
+  element (`inline-size: 92.6562px | 92.6406px`); keep the children the way the original
+  builds them.
+- **When in doubt, diff the replica against itself.** Point `original` and `replica` at
+  the same URL: whatever that reports is the noise floor of the page (unsettled springs,
+  composited text, a loop), not a difference, and it tells you what to freeze before you
+  compare against the original.
+- **A frame at a fractional offset.** A docs preview that puts the block inside a 1px
+  border at y = 4061.656 paints that border in the block's first pixel row and the block
+  from the second. Moving only the replica's *block* to the same fraction, inside a frame
+  that sits on a whole pixel, paints the block from the first row: a uniform 1px shift,
+  6000 px of difference. Give the replica's page the same kind of frame and name it in
+  `phaseAnchor`.
 
 - **Dev overlays** (`nextjs-portal`, Vite's error overlay) appear only on the replica.
   The scripts remove them; check a manual screenshot too.
@@ -186,12 +288,20 @@ Examples from the dashboard replica, each found this way:
 ## 6. Keeping the loop fast
 
 You will run these checks after every fix, so the loop's cost decides how many fixes you
-dare to make. Four things pay for themselves immediately, and `element-diff.mjs` does all
-four: cache the original (it does not change while you edit the replica), run the cases in
-parallel, share one page between cases that only look at the page, and wait adaptively —
-capture as soon as nothing has moved for 300ms instead of sleeping three seconds. A
-verification pass that took five minutes takes under ten seconds, which is the difference
-between checking once and checking after every change.
+dare to make. Every check caches what it captured from the original (it does not change
+while you edit the replica; the cache key holds the URL, viewport, theme, prep and the
+action's source, so a changed input is a miss, never a stale hit), runs its cases in
+parallel, and waits adaptively — it captures as soon as nothing has moved for 300ms.
+
+`verify.mjs --changed` adds the last piece: it reruns only the items that failed in the
+previous report and carries the rest over, marked as such. Two rules keep that honest.
+A loop run never says PASS — a fix in one place moves another, so the verdict is LOOP
+CLEAN until a full pass confirms it. And the pass you deliver on is `--final`, which
+throws the cache away and recaptures the original.
+
+What costs the most is not the run, it is reading its output. The report is about thirty
+lines; the logs are for one item at a time. If a check prints the same cause under every
+state, fix that cause first and rerun before reading the rest.
 
 ## 7. Reporting
 

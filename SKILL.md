@@ -28,22 +28,21 @@ width, a hover that turns text dark instead of keeping it gray.
 
 ## Workspace
 
-Node resolves imports next to the script file, so copy the scripts into a scratch
-workspace (use the session scratchpad) and install there:
-
 ```bash
-WS="<scratchpad>/replica"; mkdir -p "$WS"
-cp -r ~/.claude/skills/replicate-web-ui/scripts/. "$WS"
-cd "$WS" && npm install && PLAYWRIGHT_SKIP_BROWSER_GC=1 npx playwright install chromium
+WS=$(node ~/.claude/skills/replicate-web-ui/scripts/setup.mjs)   # prints the workspace path
 ```
 
-Keep `PLAYWRIGHT_SKIP_BROWSER_GC=1`. The browser cache (`ms-playwright`) is shared by
-every project on the machine, and a plain `playwright install` deletes the browser
-builds it believes are unused. Once it wiped four Chromium, Firefox and WebKit builds
-that other projects needed, and they had to be downloaded again. Without network,
-pin the playwright version that matches a folder already in `ms-playwright`
-(chromium-1181 ↔ 1.54, 1200 ↔ 1.57; the `browsers.json` of `playwright-core@<version>`
-on unpkg lists the revisions). Every script prints its usage in its header comment.
+Node resolves imports next to the script file, so `setup.mjs` copies the scripts beside
+their `node_modules` in `~/.cache/replicate-web-ui` and keeps that workspace between
+sessions: it installs once, and afterwards only refreshes the scripts. Run the tools as
+`node "$WS/<script>.mjs"`; keep configs, captures and outputs in the session scratchpad.
+It installs Chromium with `PLAYWRIGHT_SKIP_BROWSER_GC=1`: the browser cache is shared by
+every project on the machine and a plain `playwright install` deletes the builds it
+believes unused. Without network, pin the playwright version that matches a folder
+already in `ms-playwright` (chromium-1181 ↔ 1.54, 1200 ↔ 1.57).
+
+Every script prints its usage in its header comment. A value that starts with `--` needs
+the `=` form: `--decl="--foreground:"`.
 
 | Script | Use it to |
 |---|---|
@@ -56,12 +55,13 @@ on unpkg lists the revisions). Every script prints its usage in its header comme
 | `tokens.mjs` | Custom properties and typography, light and dark |
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
 | `measure.mjs` | Boxes and computed styles for a selector, original vs replica, after actions |
+| **`verify.mjs`** | **The whole verification from one config: runs the checks below, short report, verdict** |
 | `compare.mjs` | Full-page pixel diff at several widths |
-| `element-diff.mjs` | Pixel diff of one element per page (component inside a bigger page); cached, parallel |
+| `element-diff.mjs` | Pixel diff of one element per page (a block inside a bigger page), position-aligned |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
+| `states.mjs` | Interaction matrix: same actions on both pages, diffed, with "did anything happen" checks |
 | `computed-diff.mjs` | *Every* computed property of every element, per state — sees what pixels cannot |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
-| `states.mjs` + `states.example.mjs` | Interaction matrix: same actions on both pages, diffed, with "did anything happen" checks |
 | `png-tools.mjs` | Diff two PNGs; zoomed side-by-side crop of a hot cell |
 | `fingerprint-version.mjs` | Which npm versions of a library contain a code fingerprint |
 
@@ -70,10 +70,10 @@ on unpkg lists the revisions). Every script prints its usage in its header comme
 ### 1. Recon
 
 ```bash
-node capture.mjs --url <original> --out capture
+node "$WS/capture.mjs" --url <original> --out capture
 ```
 
-Look at `capture/shot-1440.png` and `stack.json`. If the capture says the page had
+Look at `capture/shot-1440.png` and the printed stack. If the capture says the page had
 not settled, raise `--wait`: charts and entry animations keep moving after
 `networkidle` (the first shot of a dashboard showed every bar flat). If scripts
 reference public sourcemaps, fetch them first; readable sources beat minified code.
@@ -87,10 +87,20 @@ Unrequested parts are easy to miss: if the page shows a shell around the content
 the shell is part of "igual". When unsure what a region does, hover and click it in a
 headless Playwright session and screenshot.
 
+Write down the **units** too, because they decide the shape of what you deliver:
+
+- *Install units.* A gallery page that lists two install commands, or two "Preview / Code"
+  frames, is two components, even when they share a page and half their sections. One
+  deliverable per unit; never one file with everything the page shows.
+- *The module graph.* `bundle-modules.mjs --deps` shows which parts the original keeps as
+  their own modules (a gradient, a number ticker, a stat band, a button). Those are the
+  original's own component boundaries: keep them, as components the user can take alone,
+  and let the page import them. A section pasted into two pages is a port that lost them.
+
 Then find out what it *does*, before writing any code:
 
 ```bash
-node behaviour-probe.mjs --url <original> --scope "<region>" [--dark]
+node "$WS/behaviour-probe.mjs" --url <original> --scope "<region>" [--dark]
 ```
 
 It lists what animates on its own and, per control, what hover changes and what Enter,
@@ -101,7 +111,7 @@ original's menu. Write down every "(no effect)" too — that is behaviour to rep
 ### 3. Extract, part by part
 
 - **Which modules to read at all** (on a React Server Components page) →
-  `rsc-refs.mjs <capture/html/page.html>`: the streamed payload names every client
+  `rsc-refs.mjs capture/000-document-<page>`: the streamed payload names every client
   component the page mounts, so you grep a handful of modules instead of hundreds.
 - **Logic, data, animation** → `bundle-modules.mjs --grep "<text visible in that part>" --deps`.
   Text found in no module means that part is server-rendered: use the DOM instead.
@@ -112,9 +122,11 @@ original's menu. Write down every "(no effect)" too — that is behaviour to rep
   counts ("×32 … ×22"), which often *is* the data.
 - **Rules not visible as utilities** (design-system classes like `.cn-button-*`,
   hover/focus/active, keyframes) → `css-rules.mjs --match … --scope …`.
-- **Tokens and typography** → `tokens.mjs`. Note `font-feature-settings`: a host that
-  sets `"cv11","ss01"` changes Geist's glyphs.
-- **Icons** → `icons.mjs`, opening menus with `--click` so their icons are included.
+- **Tokens and typography** → `tokens.mjs`, then the declarations themselves with
+  `css-rules.mjs --decl="--background:|--accent:"`. Note `font-feature-settings`: a host
+  that sets `"cv11","ss01"` changes Geist's glyphs.
+- **Icons** → the icon modules in the bundle (one tiny module per icon, exact path data),
+  or `icons.mjs`, opening menus with `--click` so their icons are included.
 - **Anything ambiguous** (an icon with no size class, an offset, a value the CSSOM
   printed as empty) → `measure.mjs`. Measure, don't guess.
 - **Rendering math that depends on a library version** (bar widths, tick rounding,
@@ -129,48 +141,64 @@ design-system classes into utilities without breaking layer precedence, containi
 app shell (sidebar overlay, portals, sticky header) inside a block, container queries
 instead of viewport breakpoints, and giving the user a full-page route.
 
-### 5. Verify until the diffs are zero or explained
+Deliver it where the project keeps such things, the way its siblings are built (find the
+closest existing component and follow its package, demo, registry entry and stylesheet).
+A faithful monolith is only half the job: **make it something a person can reuse.**
 
-For a whole page, diff the pages. For a component that lives inside someone else's
-page, diff the elements (`element-diff.mjs`): the chrome around it will never match,
-and it is not what you are replicating. That script is built for the loop you are
-about to run many times — it caches the original (which never changes while you fix
-the replica), runs cases in parallel, shares a page between cases that only look, and
-captures as soon as the page stops moving. Twelve cases across three sections, two
-themes and two widths take about 8 seconds on a rerun.
+- One deliverable per install unit, and one component per module of the original's graph.
+- A page is a composition: export every section with its copy as props (the original's
+  text as defaults), a root that carries the palette, and a default component that
+  composes them. Data — arrays, labels, hrefs, image URLs, presets — is never a constant
+  the user has to go and find.
+- Keep the original's children exactly as it builds them. `["About ", brand]` is two text
+  nodes; the string `"About beUI"` is one, and it kerns 1/64px narrower.
+- Files that use hooks or motion start with `"use client"`: they get copied into projects
+  with server components.
+- **Refactor under verification.** Get the straight port to PASS first, then split it, and
+  run `verify` again: componentizing must not move a pixel, and this is what proves it.
+
+### 5. Verify until the verdict is PASS or every difference is explained
+
+One config, one command. Copy `replica.config.example.mjs`, keep the sections that apply
+(`page` for a whole page, `elements` for a block inside someone else's page, `states` for
+the interaction matrix), and verify against a **production build** of the replica:
 
 ```bash
-node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
-node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440 --dark
-node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440 --dark --threshold 4
-node dom-diff.mjs     --original <url> --replica <url>
-node theme-leak.mjs   --original <url> --replica <url> --replica-root '[data-slot="block"]'
-cp states.example.mjs states.config.mjs   # edit URLs and actions
-node states.mjs       --config states.config.mjs
-node computed-diff.mjs --config states.config.mjs
+node "$WS/verify.mjs" --config replica.config.mjs            # full pass, original from cache
+node "$WS/verify.mjs" --config replica.config.mjs --changed  # after each fix: only what failed
+node "$WS/verify.mjs" --config replica.config.mjs --final    # before delivering: original recaptured
 ```
 
-Diff the widths on *both* sides of each breakpoint (1024 and 1023, 768 and 767): a
-container query that is off by the width of a padding only shows at the edge.
+It runs the same checks you could run by hand — pixels at every width and theme, the
+element diff, the DOM diff, the interaction matrix, every computed property per state, the
+theme scales — writes each one's full output to `<out>/logs`, and prints about thirty
+lines: one per check, the worst items, the computed differences grouped by cause, and a
+verdict. Read the summary, not the logs; open a log only for the item you are fixing.
 
-`computed-diff.mjs` is what turns "the screenshots match" into "nothing differs".
-Pixels cannot see a `cursor`, an easing curve, a transition duration, a color that only
-appears on hover, or a 0.1px box. Run it at rest, with every overlay open, in dark mode
-and at mobile width; it is normal for the first run to print host chrome as a count
-mismatch, which `ignoreElements` removes.
+- The loop is `--changed`: the original is cached and only failing items rerun, so it
+  costs seconds. It can end at **LOOP CLEAN**, never at PASS — a fix in one place moves
+  another (a dependency pin, a wrapper), so only a full pass can say PASS.
+- Deliver on `--final` only. A full pass on a cached original says so in its verdict.
+- A pixel diff fails on anything over the threshold **and** on faint pixels (threshold 4)
+  that fill a cell — a surface, a gradient, a glow. Sparse faint pixels are edge
+  antialiasing and are only counted. A thin faint line (a border a few levels off) is
+  sparse too: computed-diff is what catches it, so keep `states` in the config.
+- An action that changes nothing fails unless the state says `noEffect: true`, which you
+  set only after reading the computed value that proves it.
+- Cover both sides of each breakpoint (1024 and 1023, 768 and 767): a container query
+  that is off by the width of a padding only shows at the edge.
 
-For every non-zero result: zoom the hot cell with `png-tools.mjs pair`, then
-`measure.mjs` the element on both pages, then read the relevant source or library
-code, fix, rebuild and rerun *all* checks (a dependency pin can move other things).
-`references/verification.md` has the investigation playbook and the traps that
-produced false passes and false failures.
+For every failing item: zoom the hot cell with `png-tools.mjs pair`, `measure.mjs` the
+element on both pages, read the relevant source or library code, fix, rebuild,
+`--changed`. `references/verification.md` has the investigation playbook and the traps
+that produce false passes and false failures — read it before the first run, because
+several of them are configuration (tall viewports for `whileInView`, freezing loops,
+the position anchor).
 
 A residual difference is acceptable only when you can name its cause and it is not a
-design difference: a race inside the original (a throttled `mousemove` landing after
-`mouseleave`), hover that the browser did not recompute under a stationary pointer,
-antialiasing on a layer that was just animated. Prove that last one instead of assuming
-it: if forcing a repaint clears it, if it moves to the *original* on another run, and if
-the computed styles are identical, it is Chromium's raster cache, not your CSS.
+design difference. Prove it instead of assuming it; the playbook lists the proofs
+(same compositing mode on both sides, the replica against itself at another offset,
+a forced repaint).
 
 ### 6. Deliver
 
@@ -179,11 +207,16 @@ Tell the user, in their language:
 - where to see it, including a full-page URL: a docs preview narrower than the
   original's `md` breakpoint shows the mobile layout, which reads as "the sidebar
   doesn't expand";
-- what was checked (widths, number of states, dark, mobile) and the result;
-- every residual difference with its cause;
+- what was checked (the `--final` summary: widths, number of states, dark, mobile) and
+  the result;
+- every residual difference with its cause, and everything that was frozen or hidden for
+  the diff (a canvas, a loop) and how its motion was verified instead;
 - side effects: version pins, files you removed or rewrote, new routes.
 
-## Lessons that cost the most time
+## Build lessons that cost the most time
+
+Verification traps live in `references/verification.md`. These are about getting the
+replica right in the first place.
 
 - **Hover color vs utility color.** In shadcn "style-*" systems the component rules
   live in `@layer base`; any utility on the element wins. A `text-muted-foreground`
@@ -195,20 +228,17 @@ Tell the user, in their language:
 - **Stale local installs.** A package with its own `node_modules`/lockfile inside a
   workspace kept resolving the old version after `bun add`. Check the version the
   *app* resolves, not the one in `package.json`.
-- **Diff thresholds hide surfaces and glows.** A 0.985 vs 1.0 background is 5 levels
-  apart and passes a threshold of 40; so did a missing dark-mode text glow. Rerun with
-  `--threshold 4` and measure computed backgrounds, gradients and shadows in both themes.
-- **The user's browser is not a clean browser.** A difference the user sees but the
-  scripts don't can come from preferences the original saved in their browser (a
-  design-system style made the same buttons 40px instead of 36px). Get their DevTools
-  measurements, find the storage keys in the bundle, load them and measure again.
+- **Write tokens the way the original declares them — every rule that declares them.**
+  Reading `--foreground` back from the browser gives a converted value, and re-declaring
+  that converts it again (`#0b0b0b` came back as rgb(10,10,10)). Copy the declaration
+  verbatim, and look for a second one: a build emits hex first and the real value under
+  `@supports (color: lab(0% 0 0))`, for `:root` *and* for `.dark`. Missing the dark
+  `@supports` block made every accent rgb(0,218,219) instead of rgb(0,223,225).
+- **Invisible characters in minified strings.** A word separator that reads as `" "` was a
+  non-breaking space: with a plain space the inline-block collapsed to zero height and the
+  headline lost 11px per line. When a string's only job is spacing, check its bytes.
 - **`theme()` bakes in the host's light value.** Rewrite `theme(--color-x/.4)` in
   arbitrary values as `--theme(...)`, or the dark variant uses the light color.
-- **False "0 px".** A hover at the wrong coordinates does nothing on both pages and
-  diffs clean. `states.mjs` flags actions with no visible effect; still crop one or
-  two states to see the effect with your own eyes. When an action legitimately changes
-  nothing (a trigger whose hover background a utility cancels, a page too short to
-  scroll), confirm it by reading the computed value, then say so in the report.
 - **The host page's base layer is part of the block.** The original inherits rules that
   belong to its page, not to the component: `button:not(:disabled) { cursor: pointer }`,
   `body { font-synthesis-weight: none; text-rendering: optimizeLegibility }`. No
@@ -222,42 +252,15 @@ Tell the user, in their language:
   inheriting the root's `color`, `font-*` and tokens, and picks up the host's instead —
   visible only in dark mode, where the two foregrounds differ. Give the portal wrapper
   the same classes and `data-slot` as the root.
-- **A page that is dark by default ignores "light".** Emulating `prefers-color-scheme`
-  does nothing when the theme is a class on `<html>`. Force it in `prep` on both pages:
-  remove `dark`, add `light`, set `style.colorScheme`.
-- **Write tokens the way the original declares them.** Reading `--foreground` back from
-  the browser gives you a converted value (`lab(3.04863% 0 0)`), and re-declaring that
-  converts it again: `#0b0b0b` came back as rgb(10,10,10) instead of rgb(11,11,11).
-  Find the declaration (`css-rules.mjs --decl "--foreground:"`) and copy it verbatim.
+- **Use the original's font files when the license allows.** The same family from another
+  distribution (an npm package instead of the site's own woff2) is a different build of
+  the font: boxes match to 0.1px and every glyph still differs.
 - **The trigger is not the component.** A dropdown replica matched pixel for pixel and
   still behaved differently: the original's trigger was a motion button whose press
   gesture dispatches a synthetic `pointerdown` for keyboard presses, and the menu
   toggles on `pointerdown` as well as on Enter — so the first Enter opened and closed
   it, and Space was what opened the menu. Test the keyboard on every control and
   reproduce the mechanism you find, not the one you assume.
-- **Text antialiasing depends on the page, not the component.** The same text rendered
-  grayscale in the original and with subpixel colour fringes in the replica, because
-  their page composited that region. It is hundreds of "different" pixels and nothing
-  to fix: count colour-fringed pixels in each screenshot to identify it, then force the
-  same mode on both (e.g. `will-change: transform` on the shared ancestor) and diff again.
-- **Sub-pixel phase is not a design difference, but it reads as one.** The same section
-  sat at y.5625 on the original's page and at a whole pixel on the replica's. Every glyph
-  and every curve inside rasterized differently: 20 000 differing pixels with a replica
-  whose boxes matched to 0.001px. Align the phase (`element-diff.mjs` does it: it records
-  the original's fraction and shifts the replica by the difference). An outer `transform`
-  does not fix it — it moves the element but not the phase of the layers inside it, and
-  it changes how curves rasterize, so if you use one, use it on both sides.
-- **Fixed page chrome lands in element screenshots.** A site's floating navbar paints over
-  the component you are capturing, and every diff starts with a red band that has nothing
-  to do with your replica. Hide `position: fixed`/`sticky` elements outside the target
-  first (`hidePageChrome`).
-- **Icons are in the bundle, not only in the DOM.** Icon packages ship as one tiny module
-  per icon holding its exact path data; reading them is faster and more precise than
-  opening menus in a browser to collect markup.
-- **Infinite animations make every diff noise.** Freeze them on both pages with
-  `--prep` / `config.prep` (a CSS override that pins the moving element), then verify
-  the motion separately: measure the transform over time and compare speed, direction
-  and the hover speed change.
 - **Viewport vs container.** The user viewed the replica inside a 748px docs preview
   and concluded the hover sidebar was missing. Use container queries in the block and
   provide a full-page route.

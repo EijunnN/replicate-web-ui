@@ -3,12 +3,16 @@
 // `cursor: pointer`, an easing curve the host theme redefined, the text color a portaled
 // layer inherits from the host body, a transition duration, a 0.1px box shift.
 //
-//   node computed-diff.mjs --config states.config.mjs [--only mobile] [--props "cursor|ease"]
+//   node computed-diff.mjs --config replica.config.mjs [--only mobile,dark] [--props "cursor|ease"]
+//        [--jobs 4] [--refresh] [--out computed] [--json result.json]
 //
-// It reuses states.config.mjs (original, replica, prep, replicaPrep, wait, viewport,
-// states[]). Extra fields it understands:
+// It reads the same config as states.mjs (original, replica, prep, replicaPrep, wait,
+// viewport, states[]). The original's trees are cached in <out>/cache (`--refresh` to
+// redo) and states run `--jobs` at a time. Exit code 1 when any state differs.
+// Extra fields it understands:
 //
 //   originalRoot / replicaRoot : selector of the block root on each page (default "body").
+//                                A state can carry its own pair, for a page with several blocks.
 //   ignoreElements             : selector whose matches (and subtrees) are dropped on both
 //                                pages, for host chrome that has no counterpart, e.g.
 //                                "noscript, [data-sonner-toaster], #analytics".
@@ -21,12 +25,15 @@
 // Colors are normalized through a canvas, so oklch/lab/rgb spellings of the same color
 // compare equal; `font-family` is skipped because hashed next/font names never match.
 import { pathToFileURL } from "node:url";
-import { launch, need, openPage, parseArgs, path } from "./lib.mjs";
+import { cacheKey, ensureDir, finish, fs, launch, matchesOnly, need, openPage, parseArgs, path, pool, settle } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
 const config = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
 const propFilter = args.props ? new RegExp(args.props) : null;
+const out = ensureDir(args.out ?? path.join(config.out ?? ".", "computed"));
+const cacheDir = ensureDir(path.join(out, "cache"));
+const jobs = Number(args.jobs ?? config.jobs ?? 4);
 const browser = await launch();
 
 const collect = (page, rootSelector, ignoreElements, ignoreProps) =>
@@ -93,14 +100,20 @@ const collect = (page, rootSelector, ignoreElements, ignoreProps) =>
     { rootSelector, ignoreElements, ignoreProps },
   );
 
-let failures = 0;
-for (const state of config.states) {
-  if (args.only && !state.name.startsWith(args.only)) continue;
+async function runState(state) {
   const trees = [];
   for (const [url, root, isReplica] of [
-    [config.original, config.originalRoot ?? "body", false],
-    [config.replica, config.replicaRoot ?? "body", true],
+    [config.original, state.originalRoot ?? config.originalRoot ?? "body", false],
+    [config.replica, state.replicaRoot ?? config.replicaRoot ?? "body", true],
   ]) {
+    const cached = path.join(
+      cacheDir,
+      `${cacheKey({ url, root, state, viewport: state.viewport ?? config.viewport, wait: config.wait ?? 3000, prep: config.prep ?? "", ignoreElements: config.ignoreElements ?? "", ignoreProps: config.ignoreProps ?? "" })}.json`,
+    );
+    if (!isReplica && !args.refresh && fs.existsSync(cached)) {
+      trees.push(JSON.parse(fs.readFileSync(cached, "utf8")));
+      continue;
+    }
     const viewport = state.viewport ?? config.viewport ?? { width: 1440, height: 900 };
     const { page } = await openPage(browser, url, {
       width: viewport.width,
@@ -112,8 +125,11 @@ for (const state of config.states) {
     });
     await page.mouse.move(state.restX ?? viewport.width / 2, state.restY ?? 5);
     if (state.run) await state.run(page);
+    // A looping or late animation caught mid-flight reads as a page of differences.
+    await settle(page, { scope: root });
     trees.push(await collect(page, root, config.ignoreElements, config.ignoreProps));
     await page.close();
+    if (!isReplica) fs.writeFileSync(cached, JSON.stringify(trees[0]));
   }
 
   const groups = new Map();
@@ -144,12 +160,29 @@ for (const state of config.states) {
   const roots = Math.max(original.length, replica.length);
   for (let i = 0; i < roots; i++) walk(original[i], replica[i], (original[i] ?? replica[i]).tag);
 
+  return { state, compared, structural, groups: [...groups].map(([signature, elements]) => ({ signature, elements })) };
+}
+
+const selected = config.states.filter((state) => matchesOnly(args.only, state.name));
+const results = await pool(selected.map((state) => () => runState(state)), jobs);
+await browser.close();
+
+let failures = 0;
+const items = results.map(({ state, compared, structural, groups }) => {
   console.log(`\n=== ${state.name}: ${compared} elements compared`);
   for (const line of structural) console.log(`  ⚠ ${line}`);
-  for (const [signature, elements] of groups) {
+  for (const { signature, elements } of groups) {
     console.log(`  ×${elements.length} ${elements.slice(0, 3).join(" ; ")}\n     ${signature}`);
   }
-  if (groups.size || structural.length) failures++;
-}
-await browser.close();
+  const ok = !groups.length && !structural.length;
+  if (!ok) failures++;
+  return {
+    name: state.name,
+    ok,
+    compared,
+    structural,
+    groups: groups.map(({ signature, elements }) => ({ signature, count: elements.length, first: elements[0] })),
+  };
+});
 console.log(failures ? `\n${failures} state(s) differ` : "\nall states match");
+finish(args, { check: "computed", ok: !failures, items });

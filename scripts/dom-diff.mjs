@@ -5,10 +5,13 @@
 //
 //   node dom-diff.mjs --original URL --replica URL [--width 1440] [--tolerance 0.6]
 //        [--original-root main] [--replica-root "[data-slot=app]"] [--limit 80]
+//        [--out dom] [--refresh] [--json result.json]
+//
+// The original's rows are cached in <out>/cache until `--refresh`. Exit code 1 on any mismatch.
 //
 // "COUNT" lines mean an element exists a different number of times (missing sr-only
 // text, an extra wrapper svg); fix those first because they shift the matching.
-import { launch, need, openPage, parseArgs } from "./lib.mjs";
+import { cacheKey, ensureDir, finish, fs, launch, need, openPage, parseArgs, path } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "original", "replica");
@@ -54,10 +57,20 @@ const collect = (rootSelector) => {
   return rows;
 };
 
-const original = await openPage(browser, args.original, { width, fullHeight: true, wait: 3000 });
-const a = await original.page.evaluate(collect, args["original-root"]);
-await original.page.close();
-const replica = await openPage(browser, args.replica, { width, fullHeight: original.height, wait: 3000 });
+const cacheDir = ensureDir(path.join(args.out ?? "dom", "cache"));
+const cached = path.join(cacheDir, `${cacheKey({ url: args.original, width, root: args["original-root"] ?? "" })}.json`);
+let a;
+let originalHeight;
+if (!args.refresh && fs.existsSync(cached)) {
+  ({ rows: a, height: originalHeight } = JSON.parse(fs.readFileSync(cached, "utf8")));
+} else {
+  const original = await openPage(browser, args.original, { width, fullHeight: true, wait: 3000 });
+  a = await original.page.evaluate(collect, args["original-root"]);
+  originalHeight = original.height;
+  await original.page.close();
+  fs.writeFileSync(cached, JSON.stringify({ rows: a, height: originalHeight }));
+}
+const replica = await openPage(browser, args.replica, { width, fullHeight: originalHeight, wait: 3000 });
 const b = await replica.page.evaluate(collect, args["replica-root"]);
 await browser.close();
 
@@ -81,3 +94,4 @@ for (const [key, rowsB] of B) if (!A.has(key)) lines.push(`EXTRA ${JSON.stringif
 lines.slice(0, limit).forEach((line) => console.log(line));
 if (lines.length > limit) console.log(`… ${lines.length - limit} more`);
 console.log(`elements original ${a.length}, replica ${b.length}, mismatches ${lines.length}`);
+finish(args, { check: "dom", ok: !lines.length, items: lines.map((line) => ({ name: line.slice(0, 160), ok: false })) });

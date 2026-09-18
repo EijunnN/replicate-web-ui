@@ -3,5 +3,7 @@ capture/
 modules/
 cmp/
 states/
+verify/
 *.png
 states.config.mjs
+replica.config.mjs

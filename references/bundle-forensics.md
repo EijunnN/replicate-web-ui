@@ -29,7 +29,7 @@ before extracting more; it tells you which pieces are local and which are import
 On a React Server Components page (Next.js App Router), start one step earlier:
 
 ```bash
-node rsc-refs.mjs capture/html/<page>.html
+node rsc-refs.mjs capture/000-document-<page>
 ```
 
 The HTML streams the RSC payload in `self.__next_f.push([1,"…"])` strings; its

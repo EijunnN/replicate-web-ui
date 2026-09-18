@@ -1,12 +1,13 @@
 // Shared helpers for the replicate-web-ui scripts.
 // Run every script from a workspace that has `playwright`, `pngjs` and `js-beautify`
 // installed (see SKILL.md, "Workspace"); Node resolves imports next to the script file.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
 
-/** `--key value` / `--flag` / repeated keys become arrays. Positional args land in `_`. */
+/** `--key value` / `--key=value` / `--flag` / repeated keys become arrays. Positional args land in `_`. */
 export function parseArgs(argv = process.argv.slice(2)) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -15,9 +16,12 @@ export function parseArgs(argv = process.argv.slice(2)) {
       out._.push(token);
       continue;
     }
-    const key = token.slice(2);
+    // `--key=value` is the only way to pass a value that itself starts with "--"
+    // (`--decl="--foreground:"`): as a separate token it would read as the next flag.
+    const equals = token.indexOf("=");
+    const key = equals > -1 ? token.slice(2, equals) : token.slice(2);
     const next = argv[i + 1];
-    const value = next === undefined || next.startsWith("--") ? true : (i++, next);
+    const value = equals > -1 ? token.slice(equals + 1) : next === undefined || next.startsWith("--") ? true : (i++, next);
     if (key in out) out[key] = [].concat(out[key], value);
     else out[key] = value;
   }
@@ -32,6 +36,47 @@ export function need(args, ...keys) {
     console.error(`Missing --${missing.join(", --")}`);
     process.exit(1);
   }
+}
+
+/** `--only a,b`: a case runs when its name starts with any of the prefixes. */
+export const matchesOnly = (only, name) =>
+  !only || only === true || String(only).split(",").some((prefix) => name.startsWith(prefix.trim()));
+
+/**
+ * Key for something captured from the original. Everything that shapes the capture goes
+ * in (URL, viewport, theme, prep, the action's source), so a changed input is a cache
+ * miss, never a stale hit. The original does not change while you iterate on the replica.
+ */
+export const cacheKey = (parts) =>
+  crypto
+    .createHash("sha1")
+    .update(JSON.stringify(parts, (_, value) => (typeof value === "function" ? value.toString() : value)))
+    .digest("hex")
+    .slice(0, 12);
+
+/** Runs `tasks` (functions returning promises) `size` at a time, results in order. */
+export async function pool(tasks, size) {
+  const results = [];
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(size, tasks.length)) }, async () => {
+      while (cursor < tasks.length) {
+        const index = cursor++;
+        results[index] = await tasks[index]();
+      }
+    }),
+  );
+  return results;
+}
+
+/**
+ * Ends a check: writes the result verify.mjs collects (`--json file`) and sets the exit
+ * code, 0 when nothing differs and 1 when something does. A crash leaves no JSON behind,
+ * which is how verify.mjs tells "differs" from "did not run".
+ */
+export function finish(args, result) {
+  if (args.json) fs.writeFileSync(args.json, JSON.stringify(result, null, 2));
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,20 +167,52 @@ export async function hidePageChrome(page, keepInside) {
  */
 export const phaseOf = (box) => box.y - Math.floor(box.y);
 
-/** Shifts an element by `delta` px with margin, to match the original's phase. */
-export async function alignPhase(page, selector, index, targetPhase) {
+/**
+ * Shifts an element by `delta` px with margin, to match the original's phase. `anchor`
+ * (a selector matched with closest()) moves an ancestor instead: when the original sits in
+ * a bordered or clipped frame, that frame carries the fraction, and moving only the block
+ * inside an integer-aligned frame still paints it one row off.
+ */
+export async function alignPhase(page, selector, index, targetPhase, anchor) {
   return page.evaluate(
-    ([selector, index, targetPhase]) => {
+    ([selector, index, targetPhase, anchor]) => {
       const el = document.querySelectorAll(selector)[index];
       if (!el) return null;
+      const moved = (anchor && el.closest(anchor)) || el;
       const top = el.getBoundingClientRect().top;
       const delta = targetPhase - (top - Math.floor(top));
-      const margin = Number.parseFloat(getComputedStyle(el).marginTop) || 0;
-      el.style.marginTop = `${margin + delta}px`;
+      const margin = Number.parseFloat(getComputedStyle(moved).marginTop) || 0;
+      moved.style.marginTop = `${margin + delta}px`;
       const after = el.getBoundingClientRect().top;
       return after - Math.floor(after);
     },
-    [selector, index, targetPhase],
+    [selector, index, targetPhase, anchor ?? null],
+  );
+}
+
+/**
+ * Puts an element at the same document coordinates the original's element has. Matching
+ * the sub-pixel phase is not always enough: Chromium rasterizes in tiles laid out from the
+ * document origin, and an SVG image or a curve that falls on a different part of a tile
+ * antialiases differently. A replica diffed against *itself* 396px lower showed 16 px over
+ * the threshold and 420 faint ones, all on image edges. Same coordinates, same raster.
+ * Moves `anchor` (closest ancestor) when given, with margin and `left`, never a transform.
+ */
+export async function alignPosition(page, selector, index, target, anchor) {
+  return page.evaluate(
+    ([selector, index, target, anchor]) => {
+      const el = document.querySelectorAll(selector)[index];
+      if (!el) return null;
+      const moved = (anchor && el.closest(anchor)) || el;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(moved);
+      if (style.position === "static") moved.style.position = "relative";
+      moved.style.marginTop = `${(Number.parseFloat(style.marginTop) || 0) + target.y - (rect.y + window.scrollY)}px`;
+      moved.style.left = `${(Number.parseFloat(style.left) || 0) + target.x - (rect.x + window.scrollX)}px`;
+      const after = el.getBoundingClientRect();
+      return { x: after.x + window.scrollX, y: after.y + window.scrollY };
+    },
+    [selector, index, target, anchor ?? null],
   );
 }
 
@@ -167,7 +244,7 @@ export async function setDark(page, darkClass = "dark", lightClass = "light") {
  * nothing scrolls (fixed sidebars, sticky headers and h-svh shells then line up
  * between original and replica), and waits for entry animations to finish.
  */
-export async function openPage(browser, url, { width = 1440, height = 900, fullHeight = false, wait = 3500, dark = false, prep } = {}) {
+export async function openPage(browser, url, { width = 1440, height = 900, fullHeight = false, wait = 3500, dark = false, prep, still = true } = {}) {
   const page = await browser.newPage({ viewport: { width, height } });
   await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
   if (dark) await setDark(page);
@@ -179,6 +256,10 @@ export async function openPage(browser, url, { width = 1440, height = 900, fullH
     await page.setViewportSize({ width, height: pageHeight });
   }
   await sleep(wait);
+  // `wait` covers animations that start late; this covers the ones that are still going. A
+  // slow spring captured at a fixed delay made a page differ from itself by hundreds of pixels.
+  // Something that never stops costs the 9s limit on every open: freeze it in `prep`.
+  if (still) await settle(page);
   await removeDevOverlays(page);
   return { page, height: pageHeight };
 }
@@ -195,14 +276,19 @@ export const readPng = (file) => PNG.sync.read(fs.readFileSync(file));
  * buckets them into `cell`-sized squares and writes a dimmed image with the
  * differences in red. Antialiasing noise stays under the default threshold.
  */
-export function diffPngs(fileA, fileB, outFile, { threshold = 40, cell = 40 } = {}) {
+/** Share of a cell's pixels that must differ faintly for the cell to count as a surface. */
+const FAINT_DENSITY = 0.1;
+
+export function diffPngs(fileA, fileB, outFile, { threshold = 40, cell = 40, strict = 4 } = {}) {
   const a = readPng(fileA);
   const b = readPng(fileB);
   const width = Math.min(a.width, b.width);
   const height = Math.min(a.height, b.height);
   const out = new PNG({ width, height });
   const cells = new Map();
+  const strictCells = new Map();
   let count = 0;
+  let strictCount = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const ia = (a.width * y + x) << 2;
@@ -213,6 +299,11 @@ export function diffPngs(fileA, fileB, outFile, { threshold = 40, cell = 40 } = 
         Math.abs(a.data[ia + 1] - b.data[ib + 1]),
         Math.abs(a.data[ia + 2] - b.data[ib + 2]),
       );
+      if (delta > strict) {
+        strictCount++;
+        const key = `${Math.floor(x / cell) * cell},${Math.floor(y / cell) * cell}`;
+        strictCells.set(key, (strictCells.get(key) ?? 0) + 1);
+      }
       if (delta > threshold) {
         count++;
         const key = `${Math.floor(x / cell) * cell},${Math.floor(y / cell) * cell}`;
@@ -228,12 +319,23 @@ export function diffPngs(fileA, fileB, outFile, { threshold = 40, cell = 40 } = 
     }
   }
   if (outFile) fs.writeFileSync(outFile, PNG.sync.write(out));
-  const hotCells = [...cells.entries()]
-    .sort((p, q) => q[1] - p[1])
-    .slice(0, 12)
-    .map(([key, px]) => `${key}:${px}`);
+  const hottest = (map) =>
+    [...map.entries()]
+      .sort((p, q) => q[1] - p[1])
+      .slice(0, 12)
+      .map(([key, px]) => `${key}:${px}`);
+  const hotCells = hottest(cells);
   return {
     count,
+    // Same screenshots at a threshold of `strict`: a 0.985 vs 1.0 surface, a hover fill or
+    // a soft glow sits under the default threshold and passes at "0 px" while missing.
+    strictCount,
+    strictCells: hottest(strictCells),
+    // Faint pixels come in two kinds. Edge antialiasing is sparse: a few pixels along a curve
+    // or a glyph, a handful per cell. A surface, a gradient or a glow is dense: it fills the
+    // cells it touches. Only dense cells fail a diff; a thin faint line (a border a few levels
+    // off) is sparse too, and that one is computed-diff's to catch, not the pixels'.
+    denseCells: hottest(new Map([...strictCells].filter(([, px]) => px >= cell * cell * FAINT_DENSITY))),
     width,
     height,
     sizeMismatch: a.width !== b.width || a.height !== b.height ? `${a.width}x${a.height} vs ${b.width}x${b.height}` : null,
@@ -241,10 +343,19 @@ export function diffPngs(fileA, fileB, outFile, { threshold = 40, cell = 40 } = 
   };
 }
 
+/** A diff passes when nothing crosses the threshold, no cell is densely faint, and the sizes match. */
+export const diffOk = (result) => !result.count && !result.denseCells.length && !result.sizeMismatch;
+
 export function formatDiff(label, result) {
   const size = result.sizeMismatch ? `  SIZE ${result.sizeMismatch}` : "";
-  const cells = result.count ? `  hot cells (x,y:px) ${result.hotCells.join(" ")}` : "";
-  return `${label.padEnd(24)} diff px ${String(result.count).padStart(7)}${size}${cells}`;
+  const cells = result.count
+    ? `  hot cells (x,y:px) ${result.hotCells.join(" ")}`
+    : result.denseCells.length
+      ? `  DENSE faint cells (x,y:px) ${result.denseCells.slice(0, 6).join(" ")}`
+      : result.strictCount
+        ? `  sparse (edge antialiasing), densest ${result.strictCells[0]}`
+        : "";
+  return `${label.padEnd(24)} diff px ${String(result.count).padStart(7)}  faint ${String(result.strictCount ?? 0).padStart(6)}${size}${cells}`;
 }
 
 export const slug = (text) => text.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
