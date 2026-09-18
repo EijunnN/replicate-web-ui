@@ -56,6 +56,7 @@ on unpkg lists the revisions). Every script prints its usage in its header comme
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
 | `measure.mjs` | Boxes and computed styles for a selector, original vs replica, after actions |
 | `compare.mjs` | Full-page pixel diff at several widths |
+| `element-diff.mjs` | Pixel diff of one element per page, for a component inside a bigger page |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `computed-diff.mjs` | *Every* computed property of every element, per state — sees what pixels cannot |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
@@ -117,6 +118,10 @@ app shell (sidebar overlay, portals, sticky header) inside a block, container qu
 instead of viewport breakpoints, and giving the user a full-page route.
 
 ### 5. Verify until the diffs are zero or explained
+
+For a whole page, diff the pages. For a component that lives inside someone else's
+page, diff the elements (`element-diff.mjs`): the chrome around it will never match,
+and it is not what you are replicating.
 
 ```bash
 node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
@@ -201,6 +206,24 @@ Tell the user, in their language:
   inheriting the root's `color`, `font-*` and tokens, and picks up the host's instead —
   visible only in dark mode, where the two foregrounds differ. Give the portal wrapper
   the same classes and `data-slot` as the root.
+- **A page that is dark by default ignores "light".** Emulating `prefers-color-scheme`
+  does nothing when the theme is a class on `<html>`. Force it in `prep` on both pages:
+  remove `dark`, add `light`, set `style.colorScheme`.
+- **Write tokens the way the original declares them.** Reading `--foreground` back from
+  the browser gives you a converted value (`lab(3.04863% 0 0)`), and re-declaring that
+  converts it again: `#0b0b0b` came back as rgb(10,10,10) instead of rgb(11,11,11).
+  Find the declaration (`css-rules.mjs --decl "--foreground:"`) and copy it verbatim.
+- **The trigger is not the component.** A dropdown replica matched pixel for pixel and
+  still behaved differently: the original's trigger was a motion button whose press
+  gesture dispatches a synthetic `pointerdown` for keyboard presses, and the menu
+  toggles on `pointerdown` as well as on Enter — so the first Enter opened and closed
+  it, and Space was what opened the menu. Test the keyboard on every control and
+  reproduce the mechanism you find, not the one you assume.
+- **Text antialiasing depends on the page, not the component.** The same text rendered
+  grayscale in the original and with subpixel colour fringes in the replica, because
+  their page composited that region. It is hundreds of "different" pixels and nothing
+  to fix: count colour-fringed pixels in each screenshot to identify it, then force the
+  same mode on both (e.g. `will-change: transform` on the shared ancestor) and diff again.
 - **Infinite animations make every diff noise.** Freeze them on both pages with
   `--prep` / `config.prep` (a CSS override that pins the moving element), then verify
   the motion separately: measure the transform over time and compare speed, direction

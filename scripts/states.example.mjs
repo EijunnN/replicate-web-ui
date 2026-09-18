@@ -29,5 +29,7 @@ export default {
     { name: "lower-section-hover", fullHeight: true, run: async (page) => { await page.mouse.move(320, 1000, { steps: 4 }); await page.waitForTimeout(1200); } },
     { name: "mobile-menu", viewport: { width: 390, height: 844 }, run: async (page) => { await page.getByRole("button", { name: "Toggle Sidebar" }).click(); await page.waitForTimeout(900); } },
     { name: "dark", dark: true, fullHeight: true, static: true },
+    // A page whose theme is a class on <html> ignores prefers-color-scheme: force it.
+    // { name: "light", prep: 'document.documentElement.classList.remove("dark");document.documentElement.classList.add("light");document.documentElement.style.colorScheme="light"', static: true },
   ],
 };

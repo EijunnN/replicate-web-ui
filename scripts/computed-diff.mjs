@@ -45,6 +45,8 @@ const collect = (page, rootSelector, ignoreElements, ignoreProps) =>
           return `rgba(${[...ctx.getImageData(0, 0, 1, 1).data].join(",")})`;
         });
       const skipProp = new RegExp(ignoreProps || "^$");
+      const root = document.querySelector(rootSelector) ?? document.body;
+      const origin = root.getBoundingClientRect();
       const read = (el) => {
         const style = getComputedStyle(el);
         const values = {};
@@ -55,7 +57,11 @@ const collect = (page, rootSelector, ignoreElements, ignoreProps) =>
           values[property] = normalize(style.getPropertyValue(property));
         }
         const box = el.getBoundingClientRect();
-        values["@box"] = [box.x, box.y, box.width, box.height].map((n) => Math.round(n * 10) / 10).join(",");
+        // Relative to the block root: the two pages place the block differently, and an
+        // absolute box would report that page offset on every single element.
+        values["@box"] = box.width || box.height
+          ? [box.x - origin.x, box.y - origin.y, box.width, box.height].map((n) => Math.round(n * 10) / 10).join(",")
+          : "(no box)"; // <style>, <script> and other elements that never lay out
         const slot = el.getAttribute("data-slot");
         const text = el.childElementCount ? "" : (el.textContent || "").trim().slice(0, 20);
         return {
@@ -74,7 +80,6 @@ const collect = (page, rootSelector, ignoreElements, ignoreProps) =>
               : [child],
         );
       const build = (el) => ({ ...read(el), children: childrenOf(el).map(build) });
-      const root = document.querySelector(rootSelector) ?? document.body;
       const trees = [build(root)];
       for (const sibling of document.body.children) {
         if (sibling === root || sibling.contains(root) || root.contains(sibling)) continue;
@@ -103,7 +108,7 @@ for (const state of config.states) {
       fullHeight: state.fullHeight ?? false,
       wait: config.wait ?? 3000,
       dark: !!state.dark,
-      prep: [config.prep, isReplica ? config.replicaPrep : undefined].filter(Boolean).join(";") || undefined,
+      prep: [config.prep, state.prep, isReplica ? config.replicaPrep : undefined].filter(Boolean).join(";") || undefined,
     });
     await page.mouse.move(state.restX ?? viewport.width / 2, state.restY ?? 5);
     if (state.run) await state.run(page);

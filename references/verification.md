@@ -20,6 +20,13 @@ Use at least the widths around each breakpoint the original has: 1440, 1280, 102
 800, 390. Run `--dark` too. Differences at one width only usually mean rounding
 (e.g. a library computing a bar width), not structure.
 
+**A component, not a page** (`element-diff.mjs`). When the original lives inside a
+gallery or docs page, the page around it is not part of the replica: screenshot the
+component's own elements on both sides instead (a row of triggers, each open panel).
+Two things the element's box leaves out, check separately: anything painted outside it
+(a popover arrow sits above the panel) and where it sits relative to the control that
+opened it — measure both boxes on each page and compare the offset, not the coordinates.
+
 **Elements** (`dom-diff.mjs`). Catches what pixels hide: a font-weight on an svg, an
 extra wrapper, colors that differ by a few levels. Colors are normalized through a
 canvas because builds serialize the same color as `oklch()` or `lab()`. `COUNT`
@@ -149,6 +156,17 @@ Examples from the dashboard replica, each found this way:
   (`localStorage.setItem` before a reload, or `context.addCookies`) and measure again.
   Replicate the default unless the user asks for their variant, and tell them which one
   the replica follows.
+- **Antialiasing mode from the page around it.** The same text can rasterize grayscale
+  on one page and with subpixel colour fringes on the other, because an ancestor of one
+  of them is composited. It looks like hundreds of differing pixels along every glyph.
+  Count colour-fringed pixels (`max(|r-g|,|g-b|) > 12`) in each screenshot: if only one
+  side has them, it is the page, not the component. Force the same mode on both in
+  `prep` (e.g. `will-change: transform` on the shared ancestor) and diff again.
+- **What shows through a transparent corner.** Four blue-ish pixels at the bottom-left
+  of a rounded panel were the *original page's* content behind the corner, outside the
+  border radius. Geometry, radius and colors were identical. Read the pixel values
+  before assuming antialiasing: a hue that exists nowhere in the component is a
+  give-away that you are seeing the background through it.
 - **Color serialization.** `oklch(0.145 0 0)` vs `lab(2.75 0 0)` is the same color;
   compare normalized values (`dom-diff.mjs` does).
 

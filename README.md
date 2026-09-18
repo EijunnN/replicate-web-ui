@@ -83,6 +83,7 @@ The skill triggers on requests like:
 | `icons.mjs` | Exact icon markup and the classes each icon carries |
 | `measure.mjs` | Boxes and computed styles, original vs replica, after actions |
 | `compare.mjs` | Full-page pixel diff at several widths |
+| `element-diff.mjs` | Pixel diff of one element per page, for a component inside a bigger page |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `computed-diff.mjs` | Every computed property of every element, per state — what pixels can't show |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
