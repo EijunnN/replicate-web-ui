@@ -3,65 +3,225 @@
 // Screenshots the element itself, so only its own box is compared, and reports a size
 // mismatch instead of diffing boxes of different sizes.
 //
-//   node element-diff.mjs --config element.config.mjs [--only menu]
+//   node element-diff.mjs --config element.config.mjs [--only menu] [--refresh] [--jobs 4]
+//
+// It is built to be rerun after every fix, so it is fast by design:
+//   - the original's screenshots are cached in `cache/` and reused (`--refresh` to redo);
+//   - cases run in parallel (`--jobs`, default 4);
+//   - cases that only look (no `run`) share one page per theme and viewport;
+//   - the wait is adaptive: it captures as soon as nothing has moved for 300ms.
+// A rerun that only changed the replica costs about half of the first pass.
 //
 // Config: { original, replica, selector, out, threshold, viewport, wait, dark, prep,
-//           replicaPrep, cases: [{ name, selector?, dark?, viewport?, prep?, run(page) }] }
+//           replicaPrep, alignPhase = true, hideChrome = true, matchWidth, widthAnchor,
+//           scope, cases: [{ name, selector?, index?, dark?, viewport?, prep?, run(page) }] }
 //
-// Pick selectors that hug their content (a row of triggers, a menu panel): their size
-// then does not depend on the page around them. What the element's own box leaves out
-// still has to be checked another way — an arrow that sits outside the panel, and the
-// panel's position relative to its trigger: measure both boxes on each page and compare
-// the offset between them, not the absolute coordinates.
+// `matchWidth: true` caps the replica's wrapper at the width the original's element has
+// at that viewport, which is what makes a full-width section comparable with the same
+// section inside a narrower documentation column. `widthAnchor` picks the element to cap
+// (default: the target's parent).
+//
+// Pick selectors that hug their content (a row of triggers, a menu panel, a section):
+// their size then does not depend on the page around them. What the element's own box
+// leaves out still has to be checked another way — an arrow that sits outside the panel,
+// and the panel's position relative to its trigger: measure both boxes on each page and
+// compare the offset between them, not the absolute coordinates.
+import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { diffPngs, ensureDir, formatDiff, launch, need, openPage, parseArgs, path } from "./lib.mjs";
+import { PNG } from "pngjs";
+import {
+  alignPhase,
+  diffPngs,
+  ensureDir,
+  formatDiff,
+  fs,
+  hidePageChrome,
+  launch,
+  need,
+  parseArgs,
+  path,
+  phaseOf,
+  readPng,
+  setDark,
+  setLight,
+  settle,
+} from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
 const config = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
 const out = ensureDir(args.out ?? config.out ?? "elements");
-const threshold = Number(config.threshold ?? 40);
-const browser = await launch();
+const cacheDir = ensureDir(path.join(out, "cache"));
+const threshold = Number(args.threshold ?? config.threshold ?? 40);
+const jobs = Number(args.jobs ?? config.jobs ?? 4);
+const wantsPhase = config.alignPhase !== false;
+const hideChrome = config.hideChrome !== false;
 
-async function shoot(url, testCase, file, isReplica) {
-  const viewport = testCase.viewport ?? config.viewport ?? { width: 1440, height: 900 };
-  const { page } = await openPage(browser, url, {
-    width: viewport.width,
-    height: viewport.height,
-    wait: config.wait ?? 3000,
-    dark: testCase.dark ?? config.dark ?? false,
-    prep: [config.prep, testCase.prep, isReplica ? config.replicaPrep : undefined].filter(Boolean).join(";") || undefined,
-  });
-  await page.mouse.move(viewport.width / 2, viewport.height - 4);
-  if (testCase.run) await testCase.run(page);
-  const locator = page.locator(testCase.selector ?? config.selector).first();
-  let box = null;
-  try {
-    box = await locator.boundingBox({ timeout: 5000 });
-    await locator.screenshot({ path: file });
-  } catch {
-    box = null; // element never appeared: reported as "missing", not a crash
+const selectorOf = (testCase) => testCase.selector ?? config.selector;
+const viewportOf = (testCase) => testCase.viewport ?? config.viewport ?? { width: 1440, height: 900 };
+const themeOf = (testCase) => (testCase.dark ?? config.dark ? "dark" : "light");
+
+const cacheKey = (testCase) =>
+  crypto
+    .createHash("sha1")
+    .update(
+      JSON.stringify({
+        url: config.original,
+        name: testCase.name,
+        selector: selectorOf(testCase),
+        index: testCase.index ?? 0,
+        theme: themeOf(testCase),
+        viewport: viewportOf(testCase),
+        prep: [config.prep, testCase.prep].filter(Boolean).join(";"),
+        run: testCase.run?.toString(),
+      }),
+    )
+    .digest("hex")
+    .slice(0, 12);
+
+/** Screenshot one element, with the original's sub-pixel phase when we know it. */
+async function shoot(page, testCase, file, targetPhase, targetWidth) {
+  const selector = selectorOf(testCase);
+  const index = testCase.index ?? 0;
+  const element = page.locator(selector).nth(index);
+  if (targetWidth) {
+    await page.evaluate(
+      ([selector, index, width, anchor]) => {
+        const el = document.querySelectorAll(selector)[index];
+        const wrapper = anchor ? document.querySelector(anchor) : el?.parentElement;
+        if (!wrapper) return;
+        wrapper.style.maxWidth = `${width}px`;
+        wrapper.style.marginInline = "auto";
+      },
+      [selector, index, targetWidth, config.widthAnchor ?? null],
+    );
   }
-  await page.close();
-  return box;
+  await element.scrollIntoViewIfNeeded();
+  await settle(page, { scope: config.scope ?? selector });
+  if (wantsPhase && targetPhase !== undefined && targetPhase !== null) {
+    await alignPhase(page, selector, index, targetPhase);
+    await page.waitForTimeout(60);
+  }
+  const box = await element.boundingBox();
+  await element.screenshot({ path: file });
+  return { ...box, phase: phaseOf(box) };
 }
 
+/** One page for a group of cases: same side, same theme, same viewport. */
+async function runGroup(side, group, phases, widths) {
+  const url = side === "original" ? config.original : config.replica;
+  const page = await browser.newPage({ viewport: group.viewport });
+  await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+  if (group.theme === "dark") await setDark(page);
+  else await setLight(page);
+  const prep = [config.prep, group.prep, side === "replica" ? config.replicaPrep : undefined].filter(Boolean);
+  for (const script of prep) await page.evaluate(script);
+  if (hideChrome) await hidePageChrome(page, config.selector);
+  if (config.wait) await page.waitForTimeout(Number(config.wait));
+  const results = [];
+  for (const testCase of group.cases) {
+    if (testCase.run) await testCase.run(page);
+    const file = path.join(out, `${side}-${testCase.name}.png`);
+    const box = await shoot(page, testCase, file, phases?.[testCase.name], widths?.[testCase.name]);
+    results.push({ testCase, file, box });
+  }
+  await page.close();
+  return results;
+}
+
+/** Cases that change the page get their own group; the rest share one. */
+function groupCases(list) {
+  const groups = [];
+  const shared = new Map();
+  for (const testCase of list) {
+    const viewport = viewportOf(testCase);
+    const theme = themeOf(testCase);
+    if (testCase.run) {
+      groups.push({ theme, viewport, prep: testCase.prep, cases: [testCase] });
+      continue;
+    }
+    const key = `${theme}-${viewport.width}x${viewport.height}-${testCase.prep ?? ""}`;
+    if (!shared.has(key)) {
+      const group = { theme, viewport, prep: testCase.prep, cases: [] };
+      shared.set(key, group);
+      groups.push(group);
+    }
+    shared.get(key).cases.push(testCase);
+  }
+  return groups;
+}
+
+async function pool(tasks, size) {
+  const results = [];
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(size, tasks.length) }, async () => {
+      while (cursor < tasks.length) {
+        const index = cursor++;
+        results[index] = await tasks[index]();
+      }
+    }),
+  );
+  return results;
+}
+
+const selected = config.cases.filter((testCase) => !args.only || testCase.name.startsWith(args.only));
+const browser = await launch();
+
+// The original does not change while you iterate on the replica: shoot it once.
+const missing = selected.filter((testCase) => args.refresh || !fs.existsSync(path.join(cacheDir, `${cacheKey(testCase)}.png`)));
+if (missing.length) {
+  const shots = (await pool(groupCases(missing).map((group) => () => runGroup("original", group)), jobs)).flat();
+  for (const { testCase, file, box } of shots) {
+    fs.copyFileSync(file, path.join(cacheDir, `${cacheKey(testCase)}.png`));
+    fs.writeFileSync(path.join(cacheDir, `${cacheKey(testCase)}.json`), JSON.stringify(box));
+  }
+  console.log(`original: ${shots.length} captured, ${selected.length - missing.length} from cache`);
+} else {
+  console.log(`original: all ${selected.length} from cache`);
+}
+
+const originalBoxOf = (testCase) => JSON.parse(fs.readFileSync(path.join(cacheDir, `${cacheKey(testCase)}.json`), "utf8"));
+const replicaShots = (
+  await pool(
+    groupCases(selected).map((group) => {
+      const phases = Object.fromEntries(group.cases.map((testCase) => [testCase.name, originalBoxOf(testCase).phase]));
+      const widths = config.matchWidth
+        ? Object.fromEntries(group.cases.map((testCase) => [testCase.name, Math.round(originalBoxOf(testCase).width)]))
+        : undefined;
+      return () => runGroup("replica", group, phases, widths);
+    }),
+    jobs,
+  )
+).flat();
+await browser.close();
+
 let failures = 0;
-for (const testCase of config.cases) {
-  if (args.only && !testCase.name.startsWith(args.only)) continue;
-  const originalShot = path.join(out, `original-${testCase.name}.png`);
-  const replicaShot = path.join(out, `replica-${testCase.name}.png`);
-  const originalBox = await shoot(config.original, testCase, originalShot, false);
-  const replicaBox = await shoot(config.replica, testCase, replicaShot, true);
-  const sizes = [originalBox, replicaBox].map((b) => (b ? `${Math.round(b.width * 10) / 10}x${Math.round(b.height * 10) / 10}` : "(missing)"));
-  if (sizes[0] !== sizes[1]) {
-    console.log(`${testCase.name.padEnd(24)} size ${sizes[0]} vs ${sizes[1]}  ⚠ different box`);
+for (const { testCase, file, box } of replicaShots) {
+  const originalFile = path.join(cacheDir, `${cacheKey(testCase)}.png`);
+  const originalBox = originalBoxOf(testCase);
+  const size = (b) => `${Math.round(b.width * 10) / 10}x${Math.round(b.height * 10) / 10}`;
+  if (size(originalBox) !== size(box)) {
+    console.log(`${testCase.name.padEnd(24)} size ${size(originalBox)} vs ${size(box)}  ⚠ different box`);
     failures++;
     continue;
   }
-  const result = diffPngs(originalShot, replicaShot, path.join(out, `diff-${testCase.name}.png`), { threshold });
-  console.log(`${formatDiff(testCase.name, result)}  (${sizes[0]})`);
+  // A box whose height ends on a half pixel rasterizes one row taller on one side;
+  // compare the common area instead of calling that a difference.
+  const [left, right] = [readPng(originalFile), readPng(file)];
+  const width = Math.min(left.width, right.width);
+  const height = Math.min(left.height, right.height);
+  const crop = (png, target) => {
+    if (png.width === width && png.height === height) return null;
+    const cropped = new PNG({ width, height });
+    PNG.bitblt(png, cropped, 0, 0, width, height, 0, 0);
+    fs.writeFileSync(target, PNG.sync.write(cropped));
+    return target;
+  };
+  const leftFile = crop(left, path.join(out, `crop-original-${testCase.name}.png`)) ?? originalFile;
+  const rightFile = crop(right, path.join(out, `crop-replica-${testCase.name}.png`)) ?? file;
+  const result = diffPngs(leftFile, rightFile, path.join(out, `diff-${testCase.name}.png`), { threshold });
+  console.log(`${formatDiff(testCase.name, result)}  (${size(box)})`);
   if (result.count) failures++;
 }
-await browser.close();
 console.log(failures ? `${failures} case(s) differ` : "all cases match");

@@ -43,7 +43,8 @@ The skill triggers on requests like:
 1. **Recon**: full-page capture, every JS/CSS response, a fingerprint of the stack
    (bundler, React Server Components, Radix, shadcn, recharts, cmdk…).
 2. **Map**: list every part, including the app shell, overlays, shortcuts, the mobile
-   layout and dark mode.
+   layout and dark mode, then probe what the original *does* — what animates on its own,
+   what hover changes, and what the keyboard does to every control — before writing code.
 3. **Extract**: split minified Turbopack/webpack chunks into modules and find them by
    visible text; dump the rendered DOM for final class lists and server-rendered parts;
    pull design-system rules and hover states from the CSSOM; read tokens in light and
@@ -62,6 +63,10 @@ The skill triggers on requests like:
 6. **Deliver**: what was checked, the results, and every residual difference with its
    cause.
 
+The checks are meant to be rerun after every fix, so they cache the original, run in
+parallel and wait adaptively: a pass that would take five minutes takes seconds, which is
+what makes "check everything again" a reflex rather than a decision.
+
 ## What's inside
 
 | Path | Purpose |
@@ -76,6 +81,7 @@ The skill triggers on requests like:
 |---|---|
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Splits Turbopack/webpack chunks into modules, finds them by text, follows imports |
+| `behaviour-probe.mjs` | What the original does on its own, on hover and on the keyboard, before you build |
 | `rsc-refs.mjs` | Which client components a React Server Components page mounts, and where they live |
 | `dom-dump.mjs` | Readable rendered DOM of a region, optionally after opening overlays |
 | `css-rules.mjs` | CSS rules from the live CSSOM by selector or by declaration, with @layer/@media context |
@@ -83,7 +89,7 @@ The skill triggers on requests like:
 | `icons.mjs` | Exact icon markup and the classes each icon carries |
 | `measure.mjs` | Boxes and computed styles, original vs replica, after actions |
 | `compare.mjs` | Full-page pixel diff at several widths |
-| `element-diff.mjs` | Pixel diff of one element per page, for a component inside a bigger page |
+| `element-diff.mjs` | Pixel diff of one element per page (component inside a bigger page); cached, parallel, phase-aligned |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `computed-diff.mjs` | Every computed property of every element, per state — what pixels can't show |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |

@@ -10,7 +10,8 @@ difference has a named cause that is not a design difference.
 3. Investigating a difference
 4. Traps: false passes
 5. Traps: false failures
-6. Reporting
+6. Keeping the loop fast
+7. Reporting
 
 ## 1. The four checks
 
@@ -23,6 +24,11 @@ Use at least the widths around each breakpoint the original has: 1440, 1280, 102
 **A component, not a page** (`element-diff.mjs`). When the original lives inside a
 gallery or docs page, the page around it is not part of the replica: screenshot the
 component's own elements on both sides instead (a row of triggers, each open panel).
+Three settings make that comparison honest: `hideChrome` (on by default) hides the host's
+fixed navbar so it stops painting over the capture, `matchWidth` caps the replica's
+wrapper at the width the original's element has at that viewport (a full-width section
+against the same section in a narrower docs column), and `alignPhase` (on by default)
+matches the sub-pixel offset the two pages leave the element at.
 Two things the element's box leaves out, check separately: anything painted outside it
 (a popover arrow sits above the panel) and where it sits relative to the control that
 opened it — measure both boxes on each page and compare the offset, not the coordinates.
@@ -167,10 +173,27 @@ Examples from the dashboard replica, each found this way:
   border radius. Geometry, radius and colors were identical. Read the pixel values
   before assuming antialiasing: a hue that exists nowhere in the component is a
   give-away that you are seeing the background through it.
+- **Sub-pixel phase.** Identical boxes, identical colors, and yet every glyph differs.
+  The two pages leave the component at different fractional offsets, and a composited
+  layer rasterizes at its own phase: on one section that was 20 000 pixels of "difference"
+  over a replica measured identical to 0.001px. `element-diff.mjs` aligns it; if you are
+  diffing by hand, shift the replica by `originalTop - floor(originalTop)` minus its own
+  fraction, using margin (which moves the element) rather than a transform (which moves
+  the element but not the phase of the layers inside it).
 - **Color serialization.** `oklch(0.145 0 0)` vs `lab(2.75 0 0)` is the same color;
   compare normalized values (`dom-diff.mjs` does).
 
-## 6. Reporting
+## 6. Keeping the loop fast
+
+You will run these checks after every fix, so the loop's cost decides how many fixes you
+dare to make. Four things pay for themselves immediately, and `element-diff.mjs` does all
+four: cache the original (it does not change while you edit the replica), run the cases in
+parallel, share one page between cases that only look at the page, and wait adaptively —
+capture as soon as nothing has moved for 300ms instead of sleeping three seconds. A
+verification pass that took five minutes takes under ten seconds, which is the difference
+between checking once and checking after every change.
+
+## 7. Reporting
 
 State what you ran and what it showed, with numbers: widths × result, number of
 states and how many matched, dark and mobile, element mismatches left and why. List

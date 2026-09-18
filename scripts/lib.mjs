@@ -51,6 +51,94 @@ export async function launch() {
   }
 }
 
+/**
+ * Waits until the page stops moving instead of sleeping a fixed amount: entry springs,
+ * fonts and late images all settle here, and a page that is already still returns in a
+ * frame or two. `scope` narrows the sampling to the region that matters.
+ */
+export async function settle(page, { quiet = 300, limit = 9000, scope = "body" } = {}) {
+  await page.evaluate(
+    async ([quiet, limit, scope]) => {
+      await document.fonts?.ready;
+      const sample = () =>
+        [...document.querySelectorAll(`${scope}, ${scope} *`)]
+          .slice(0, 400)
+          .map((el) => {
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            return `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)},${cs.opacity},${cs.filter},${cs.transform}`;
+          })
+          .join("|");
+      const start = performance.now();
+      let last = sample();
+      let stableSince = performance.now();
+      while (performance.now() - stableSince < quiet && performance.now() - start < limit) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const now = sample();
+        if (now !== last) {
+          last = now;
+          stableSince = performance.now();
+        }
+      }
+    },
+    [quiet, limit, scope],
+  );
+}
+
+/** Forces light on a page whose theme is a class on <html>: `dark: false` is not enough. */
+export async function setLight(page, lightClass = "light", darkClass = "dark") {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.evaluate(
+    ([light, dark]) => {
+      const html = document.documentElement;
+      html.classList.remove(dark);
+      html.classList.add(light);
+      html.style.colorScheme = "light";
+    },
+    [lightClass, darkClass],
+  );
+}
+
+/**
+ * Hides the host page's fixed and sticky chrome. An element screenshot captures whatever
+ * is painted over the element, so a site's floating navbar lands on top of the component
+ * you are comparing and every diff starts with a red band.
+ */
+export async function hidePageChrome(page, keepInside) {
+  await page.evaluate((keepInside) => {
+    for (const el of document.querySelectorAll("body *")) {
+      const position = getComputedStyle(el).position;
+      if (position !== "fixed" && position !== "sticky") continue;
+      if (keepInside && el.closest(keepInside)) continue;
+      el.style.visibility = "hidden";
+    }
+  }, keepInside ?? null);
+}
+
+/**
+ * Reads the sub-pixel phase of an element: where its top edge sits between two device
+ * pixels. Two pages place the same component at different fractions, and half a pixel of
+ * phase re-rasterizes every glyph and curve inside it.
+ */
+export const phaseOf = (box) => box.y - Math.floor(box.y);
+
+/** Shifts an element by `delta` px with margin, to match the original's phase. */
+export async function alignPhase(page, selector, index, targetPhase) {
+  return page.evaluate(
+    ([selector, index, targetPhase]) => {
+      const el = document.querySelectorAll(selector)[index];
+      if (!el) return null;
+      const top = el.getBoundingClientRect().top;
+      const delta = targetPhase - (top - Math.floor(top));
+      const margin = Number.parseFloat(getComputedStyle(el).marginTop) || 0;
+      el.style.marginTop = `${margin + delta}px`;
+      const after = el.getBoundingClientRect().top;
+      return after - Math.floor(after);
+    },
+    [selector, index, targetPhase],
+  );
+}
+
 /** Dev-only overlays that would pollute screenshots of a local replica. */
 const DEV_OVERLAYS = ["nextjs-portal", "vite-error-overlay", "astro-dev-toolbar", "#webpack-dev-server-client-overlay"];
 

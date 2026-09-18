@@ -38,6 +38,11 @@ mounts, with the chunk each lives in. That turns "which of these 200 modules mat
 into a list of five or six, and the rest of the payload holds the props the server
 passed them — often the page's data, already in order.
 
+Icons are worth a special mention: icon packages compile to one tiny module per icon,
+holding the icon name and its exact path data (`(0, factory)("brain-circuit", [["path",
+{ d: "M12 5a3 3..." }], …])`). Reading those modules is faster and more precise than
+opening every menu in a browser to collect the rendered markup.
+
 Strings not found in any module are server-rendered (see section 4) or live in a
 lazy chunk that loads only after an interaction. For the latter, open the overlay or
 switch the tab in a Playwright session with `capture.mjs`-style response logging, or

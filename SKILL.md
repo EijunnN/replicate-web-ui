@@ -50,13 +50,14 @@ on unpkg lists the revisions). Every script prints its usage in its header comme
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Split Turbopack/webpack chunks into modules; find them by visible text; follow imports |
 | `rsc-refs.mjs` | Which client components an RSC page mounts, and their module ids |
+| `behaviour-probe.mjs` | What the original does on its own, on hover and on the keyboard, before you build |
 | `dom-dump.mjs` | Readable rendered DOM of a region, optionally after opening overlays |
 | `css-rules.mjs` | CSS rules from the live CSSOM by selector regex (`--match`) or by declaration (`--decl`) |
 | `tokens.mjs` | Custom properties and typography, light and dark |
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
 | `measure.mjs` | Boxes and computed styles for a selector, original vs replica, after actions |
 | `compare.mjs` | Full-page pixel diff at several widths |
-| `element-diff.mjs` | Pixel diff of one element per page, for a component inside a bigger page |
+| `element-diff.mjs` | Pixel diff of one element per page (component inside a bigger page); cached, parallel |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `computed-diff.mjs` | *Every* computed property of every element, per state — sees what pixels cannot |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
@@ -85,6 +86,17 @@ responsive variants (below `md` a sidebar usually becomes a sheet) and dark mode
 Unrequested parts are easy to miss: if the page shows a shell around the content,
 the shell is part of "igual". When unsure what a region does, hover and click it in a
 headless Playwright session and screenshot.
+
+Then find out what it *does*, before writing any code:
+
+```bash
+node behaviour-probe.mjs --url <original> --scope "<region>" [--dark]
+```
+
+It lists what animates on its own and, per control, what hover changes and what Enter,
+Space and the arrows do. Twenty seconds here is worth an hour later: one dropdown
+replica was finished and diffing at 0 px before anyone noticed Enter did not open the
+original's menu. Write down every "(no effect)" too — that is behaviour to reproduce.
 
 ### 3. Extract, part by part
 
@@ -121,7 +133,11 @@ instead of viewport breakpoints, and giving the user a full-page route.
 
 For a whole page, diff the pages. For a component that lives inside someone else's
 page, diff the elements (`element-diff.mjs`): the chrome around it will never match,
-and it is not what you are replicating.
+and it is not what you are replicating. That script is built for the loop you are
+about to run many times — it caches the original (which never changes while you fix
+the replica), runs cases in parallel, shares a page between cases that only look, and
+captures as soon as the page stops moving. Twelve cases across three sections, two
+themes and two widths take about 8 seconds on a rerun.
 
 ```bash
 node compare.mjs      --original <url> --replica <url> --out cmp --widths 1440,1280,1024,800,390
@@ -224,6 +240,20 @@ Tell the user, in their language:
   their page composited that region. It is hundreds of "different" pixels and nothing
   to fix: count colour-fringed pixels in each screenshot to identify it, then force the
   same mode on both (e.g. `will-change: transform` on the shared ancestor) and diff again.
+- **Sub-pixel phase is not a design difference, but it reads as one.** The same section
+  sat at y.5625 on the original's page and at a whole pixel on the replica's. Every glyph
+  and every curve inside rasterized differently: 20 000 differing pixels with a replica
+  whose boxes matched to 0.001px. Align the phase (`element-diff.mjs` does it: it records
+  the original's fraction and shifts the replica by the difference). An outer `transform`
+  does not fix it — it moves the element but not the phase of the layers inside it, and
+  it changes how curves rasterize, so if you use one, use it on both sides.
+- **Fixed page chrome lands in element screenshots.** A site's floating navbar paints over
+  the component you are capturing, and every diff starts with a red band that has nothing
+  to do with your replica. Hide `position: fixed`/`sticky` elements outside the target
+  first (`hidePageChrome`).
+- **Icons are in the bundle, not only in the DOM.** Icon packages ship as one tiny module
+  per icon holding its exact path data; reading them is faster and more precise than
+  opening menus in a browser to collect markup.
 - **Infinite animations make every diff noise.** Freeze them on both pages with
   `--prep` / `config.prep` (a CSS override that pins the moving element), then verify
   the motion separately: measure the transform over time and compare speed, direction
