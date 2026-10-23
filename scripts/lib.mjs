@@ -216,6 +216,20 @@ export async function alignPosition(page, selector, index, target, anchor) {
   );
 }
 
+/**
+ * Navigates, retrying once on a network error (a local server that reset or refused a
+ * connection under load). A page that loads and differs is never retried: only the transport.
+ */
+export async function goto(page, url) {
+  try {
+    await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+  } catch (error) {
+    if (!/net::ERR_(CONNECTION_(RESET|REFUSED|CLOSED|ABORTED)|EMPTY_RESPONSE)/.test(String(error))) throw error;
+    await sleep(1500);
+    await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+  }
+}
+
 /** Dev-only overlays that would pollute screenshots of a local replica. */
 const DEV_OVERLAYS = ["nextjs-portal", "vite-error-overlay", "astro-dev-toolbar", "#webpack-dev-server-client-overlay"];
 
@@ -246,7 +260,12 @@ export async function setDark(page, darkClass = "dark", lightClass = "light") {
  */
 export async function openPage(browser, url, { width = 1440, height = 900, fullHeight = false, wait = 3500, dark = false, prep, still = true } = {}) {
   const page = await browser.newPage({ viewport: { width, height } });
-  await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+  // Uncaught exceptions and console errors, so a replica that renders blank or half-mounted
+  // says why instead of diffing as one big red block.
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(`pageerror: ${String(error.message ?? error).slice(0, 300)}`));
+  page.on("console", (message) => message.type() === "error" && errors.push(`console: ${message.text().slice(0, 300)}`));
+  await goto(page, url);
   if (dark) await setDark(page);
   await removeDevOverlays(page);
   if (prep) await page.evaluate(prep);
@@ -261,8 +280,20 @@ export async function openPage(browser, url, { width = 1440, height = 900, fullH
   // Something that never stops costs the 9s limit on every open: freeze it in `prep`.
   if (still) await settle(page);
   await removeDevOverlays(page);
-  return { page, height: pageHeight };
+  return { page, height: pageHeight, errors };
 }
+
+/**
+ * The same equivalence for a declared value everywhere a check compares one verbatim: Chrome
+ * spaces a value differently per page, and builds print the same number differently (`.2` and
+ * `0.2`, `150ms` and `.15s`, `calc(2.25 / 1.875)` folded into `1.2` by one minifier only).
+ */
+export const canonicalValue = (value) =>
+  (value ?? "")
+    .replace(/\s+/g, "")
+    .replace(/calc\(([\d.]+)\/([\d.]+)\)/g, (_, a, b) => String(Number((a / b).toFixed(4))))
+    .replace(/(\d*\.?\d+)ms\b/g, (_, ms) => `${Number((ms / 1000).toFixed(4))}s`)
+    .replace(/(^|[^\d.])0+(?=\.\d)/g, "$1");
 
 export function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });

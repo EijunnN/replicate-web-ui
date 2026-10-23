@@ -185,7 +185,8 @@ Examples from the dashboard replica, each found this way:
   threshold and 420 faint ones, all on avatar edges; with the phase aligned and the
   position not, the same pixels showed up against the original. `element-diff.mjs` now
   aligns the full document position; if a block still shows sparse edge noise, run that
-  self-test (same page, `main{padding-top:+396px}`) before hunting a cause in the CSS.
+  self-test (`verify --self` with `main{padding-top:+396px}` added to `replicaPrep`) before
+  hunting a cause in the CSS.
 - **Text inside a composited layer.** `will-change: transform` on every word of a headline,
   a ticker's digit column, a `backdrop-filter` card: each is its own layer, rasterized at
   its own sub-pixel origin, which the page around the block decides. Boxes and computed
@@ -197,6 +198,11 @@ Examples from the dashboard replica, each found this way:
   are not even stable against themselves: the same page loaded twice differed by 500 px on
   a spring-revealed headline until they were flattened. In the whole-page mode the
   top-level `prep` reaches computed-diff too, so run `--only computed` once without it.
+- **The harness is checked before the first port.** Run
+  `verify --only env,env-dark,theme,theme-dark` against the empty harness: it compares what
+  `<html>` and `<body>` paint and pass down and, with `tokens` set, the original's palette on
+  the block root. Every defect it finds would otherwise surface as a diff in every block,
+  hours later.
 - **The harness is part of the comparison.** The original shows a block inside a gallery:
   second on the page, in a 1px frame, in a column, as a flex item, over the gallery's page
   colour. The replica's own route shows it first, edge to edge, as a block child, over the
@@ -221,10 +227,11 @@ Examples from the dashboard replica, each found this way:
   hundreds of faint pixels over a page that "did not change". computed-diff names the
   element (`inline-size: 92.6562px | 92.6406px`); keep the children the way the original
   builds them.
-- **When in doubt, diff the replica against itself.** Point `original` and `replica` at
-  the same URL: whatever that reports is the noise floor of the page (unsettled springs,
-  composited text, a loop), not a difference, and it tells you what to freeze before you
-  compare against the original.
+- **When in doubt, diff the replica against itself.** `verify --self` points the original at
+  the replica (its URL, selectors, indexes, roots and `replicaPrep`) and runs the pixel and
+  computed checks into `<out>/self`: whatever that reports is the noise floor of the page
+  (unsettled springs, composited text, a loop), not a difference, and it tells you what to
+  freeze before you compare against the original. It never touches the real report.
 - **A frame at a fractional offset.** A docs preview that puts the block inside a 1px
   border at y = 4061.656 paints that border in the block's first pixel row and the block
   from the second. Moving only the replica's *block* to the same fraction, inside a frame

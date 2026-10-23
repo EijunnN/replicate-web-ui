@@ -7,32 +7,70 @@
 //   node verify.mjs --config replica.config.mjs --changed  only what failed last time
 //   node verify.mjs --config replica.config.mjs --final    full pass, original recaptured
 //        [--only states,computed] [--jobs 4] [--refresh]
+//   node verify.mjs --config replica.config.mjs --self     the replica against itself: its noise floor
 //
 // Which checks run (override with `checks: [...]` in the config):
 //   page: {...}      → compare (light, and dark when page.dark), dom, states
 //   elements: {...}  → elements
 //   states: [...]    → computed (and states, when `page` is set)
-//   always           → theme (and theme-dark when anything is checked in dark)
+//   always           → env, theme (and env-dark, theme-dark when anything is checked in dark)
 //
 // The loop is `--changed` after every fix: seconds, because the original is cached and
 // only the failing cases rerun. It can end at "LOOP CLEAN", never at "PASS": a fix in one
 // place moves another (a dependency pin, a wrapper), so only a full pass can say PASS, and
 // only `--final`, which recaptures the original, is the one you deliver on.
-// Exit code 0 on PASS / LOOP CLEAN, 1 otherwise.
+// `--self` points the original at the replica (its URL, selectors, roots and prep) and runs the
+// pixel and computed checks: whatever differs there is the page differing from itself (an
+// unsettled spring, composited text, a loop), to freeze before any diff against the original
+// means anything. It writes to <out>/self and never touches the real report.
+// Exit code 0 on PASS / LOOP CLEAN / a clean noise floor, 1 otherwise.
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureDir, fs, need, parseArgs, path } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
-const configPath = path.resolve(args.config);
-const config = (await import(pathToFileURL(configPath).href)).default;
 const here = path.dirname(fileURLToPath(import.meta.url));
+let configPath = path.resolve(args.config);
+if (args.self) configPath = writeSelfConfig(configPath);
+const config = (await import(pathToFileURL(configPath).href)).default;
 const out = ensureDir(config.out ?? "verify");
 const logs = ensureDir(path.join(out, "logs"));
 const reportFile = path.join(out, "report.json");
 const previous = fs.existsSync(reportFile) ? JSON.parse(fs.readFileSync(reportFile, "utf8")) : null;
-const refresh = args.refresh || args.final;
+// The self test's "original" is the replica, which changes between runs: never from cache.
+const refresh = args.refresh || args.final || args.self;
+
+/**
+ * A config whose original is the replica: same URL, selectors, indexes, roots, and the
+ * replica's prep on both sides. Written beside the real one so its relative imports resolve.
+ */
+function writeSelfConfig(file) {
+  const target = path.join(path.dirname(file), `.self.${path.basename(file)}`);
+  const source = `import base from ${JSON.stringify(pathToFileURL(file).href)};
+const join = (...parts) => parts.filter(Boolean).join(";") || undefined;
+const mirror = (level, parent = {}) => level && {
+  ...level,
+  originalRoot: level.replicaRoot ?? level.originalRoot,
+  selector: level.replicaSelector ?? level.selector,
+  // A case without its own index is the original's first match and the replica's replicaIndex.
+  index: level.replicaIndex ?? parent.replicaIndex ?? level.index,
+  prep: join(level.prep ?? parent.prep, level.replicaPrep ?? parent.replicaPrep),
+  replicaPrep: undefined,
+};
+const top = mirror(base);
+export default {
+  ...top,
+  original: base.replica,
+  out: (base.out ?? "verify") + "/self",
+  elements: base.elements && { ...mirror(base.elements, base), cases: base.elements.cases?.map((c) => mirror(c, { replicaIndex: base.elements.replicaIndex })) },
+  cases: base.cases?.map((c) => mirror(c, {})),
+  states: base.states?.map((s) => mirror(s, {})),
+};
+`;
+  fs.writeFileSync(target, source);
+  return target;
+}
 
 const anyDark =
   !!config.page?.dark ||
@@ -50,9 +88,11 @@ const wanted =
     config.elements && "elements",
     config.page && config.states?.length && "states",
     config.states?.length && "computed",
+    "env",
+    anyDark && "env-dark",
     "theme",
     anyDark && "theme-dark",
-  ].filter(Boolean);
+  ].filter((check) => check && (!args.self || /^(compare|elements|states|computed)/.test(check)));
 
 const flag = (name, value) =>
   value === undefined || value === null || value === false ? [] : value === true ? [`--${name}`] : [`--${name}`, String(value)];
@@ -72,12 +112,14 @@ const compareArgs = (dark) => [
 const commands = {
   compare: () => ["compare.mjs", compareArgs(false)],
   "compare-dark": () => ["compare.mjs", compareArgs(true)],
-  dom: () => ["dom-diff.mjs", [...urls, "--out", path.join(out, "dom"), ...roots, ...flag("width", config.viewport?.width), "--limit", "400"]],
+  dom: () => ["dom-diff.mjs", [...urls, "--out", path.join(out, "dom"), ...roots, ...flag("width", config.viewport?.width), "--limit", "400", ...flag("prep", config.prep), ...flag("replica-prep", config.replicaPrep)]],
   elements: () => ["element-diff.mjs", ["--config", configPath, "--out", path.join(out, "elements")]],
   states: () => ["states.mjs", ["--config", configPath, "--out", path.join(out, "states")]],
   computed: () => ["computed-diff.mjs", ["--config", configPath, "--out", path.join(out, "computed")]],
-  theme: () => ["theme-leak.mjs", [...urls, ...roots, ...flag("ignore", config.ignoreTokens)]],
-  "theme-dark": () => ["theme-leak.mjs", [...urls, ...roots, ...flag("ignore", config.ignoreTokens), "--dark"]],
+  env: () => ["page-env.mjs", ["--config", configPath]],
+  "env-dark": () => ["page-env.mjs", ["--config", configPath, "--dark"]],
+  theme: () => ["theme-leak.mjs", [...urls, ...roots, ...flag("ignore", config.ignoreTokens), ...flag("tokens", config.tokens)]],
+  "theme-dark": () => ["theme-leak.mjs", [...urls, ...roots, ...flag("ignore", config.ignoreTokens), ...flag("tokens", config.tokens), "--dark"]],
 };
 // Checks whose items can be rerun one by one, and the flag that selects them.
 const selectable = { elements: "only", states: "only", computed: "only", compare: "widths", "compare-dark": "widths" };
@@ -102,15 +144,16 @@ function run(check, extra) {
 }
 
 const report = { mode: args.final ? "final" : args.changed ? "changed" : "full", at: new Date().toISOString(), checks: [] };
-for (const check of wanted) {
-  if (args.only && !String(args.only).split(",").includes(check)) continue;
+// Checks that read values, not pixels, run beside the screenshot checks instead of after them.
+// Screenshot checks stay one at a time, as before: they wait for stillness, and two of them
+// animating at once on a loaded machine is a source of noise nobody should have to rule out.
+const valueChecks = new Set(["env", "env-dark", "theme", "theme-dark", "dom"]);
+const runOne = async (check) => {
+  if (args.only && !String(args.only).split(",").includes(check)) return null;
   const before = previous?.checks.find((entry) => entry.check === check);
   let extra = [];
   if (args.changed && before && !before.crashed) {
-    if (before.ok) {
-      report.checks.push({ ...before, carried: true });
-      continue;
-    }
+    if (before.ok) return { ...before, carried: true };
     const failing = before.items.filter((item) => !item.ok).map((item) => item.name);
     if (selectable[check] && failing.length) {
       // compare names its items "1440" / "1440-dark"; the flag wants the bare widths.
@@ -127,8 +170,18 @@ for (const check of wanted) {
     result.ok = result.items.every((item) => item.ok);
     result.partial = true;
   }
-  report.checks.push(result);
-}
+  return result;
+};
+const results = new Map();
+// One value check at a time beside the screenshot checks: more browsers than that at once made a
+// local server reset connections, and a crash reads as a failure.
+const valueRuns = (async () => {
+  for (const check of wanted.filter((check) => valueChecks.has(check))) results.set(check, await runOne(check));
+})();
+for (const check of wanted.filter((check) => !valueChecks.has(check))) results.set(check, await runOne(check));
+await valueRuns;
+// Report in the declared order, whatever finished first.
+for (const check of wanted) if (results.get(check)) report.checks.push(results.get(check));
 fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
 
 // ── Report ────────────────────────────────────────────────────────────────────────────
@@ -182,7 +235,11 @@ for (const entry of report.checks) {
   if (failing.length > 6) lines.push(`        … ${failing.length - 6} more in ${path.join(logs, `${entry.check}.log`)}`);
 }
 const clean = report.checks.length > 0 && report.checks.every((entry) => entry.ok && !entry.crashed && entry.items.every((item) => item.ok));
-const verdict = !clean
+const verdict = args.self
+  ? clean
+    ? "NOISE FLOOR CLEAN — the replica matches itself, so a difference against the original is real"
+    : "NOISE FLOOR — the replica differs from itself in the items above: freeze them in prep before trusting a diff"
+  : !clean
   ? "FAIL"
   : args.final && full
     ? "PASS (final: every check, original recaptured)"

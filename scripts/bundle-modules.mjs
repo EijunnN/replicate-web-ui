@@ -58,7 +58,84 @@ for (const file of fs.readdirSync(args.dir).filter((name) => /script/.test(name)
       }
     }
   }
+  // A chunk that throws before it registers (or wraps its push in something the sandbox does
+  // not provide) still holds `,<id>,e=>{…}` factories: cut them out by a balanced-brace scan.
+  if (!registered && /TURBOPACK|webpackChunk/.test(code)) {
+    for (const [id, src] of scanFactories(code)) {
+      if (!modules.has(id)) modules.set(id, { file, bundler: "scanned", src });
+      registered++;
+    }
+  }
   if (!registered) loose.push({ file, code });
+}
+
+/** Factories after a numeric id, found textually. Honours strings, templates, regexes and comments. */
+function scanFactories(code) {
+  const found = [];
+  const head = /[,[](\d{2,8}),(?=\(?\s*[A-Za-z_$][\w$]*\s*(?:,[^)]*\))?\s*=>|function\b)/g;
+  let match;
+  while ((match = head.exec(code))) {
+    const from = match.index + match[0].length;
+    const end = closingBrace(code, code.indexOf("{", from));
+    if (end < 0) continue;
+    found.push([match[1], code.slice(from, end + 1)]);
+    head.lastIndex = end + 1;
+  }
+  return found;
+}
+
+function closingBrace(code, start) {
+  if (start < 0) return -1;
+  let depth = 0;
+  let prev = "";
+  for (let i = start; i < code.length; i++) {
+    const c = code[i];
+    if (c === '"' || c === "'" || c === "`") {
+      i = skipString(code, i);
+      prev = c;
+      continue;
+    }
+    if (c === "/" && code[i + 1] === "/") {
+      while (i < code.length && code[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && code[i + 1] === "*") {
+      i = code.indexOf("*/", i + 2) + 1;
+      if (i <= 0) return -1;
+      continue;
+    }
+    // A slash after an operator or an opening bracket starts a regex literal, not a division.
+    if (c === "/" && /[=(,:[!&|?{};+\-*%~^]/.test(prev)) {
+      for (i++; i < code.length && code[i] !== "/"; i++) {
+        if (code[i] === "\\") i++;
+        else if (code[i] === "[") while (++i < code.length && code[i] !== "]") if (code[i] === "\\") i++;
+      }
+      prev = "/";
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+    if (!/\s/.test(c)) prev = c;
+  }
+  return -1;
+}
+
+function skipString(code, start) {
+  const quote = code[start];
+  for (let i = start + 1; i < code.length; i++) {
+    if (code[i] === "\\") i++;
+    else if (code[i] === quote) return i;
+    else if (quote === "`" && code[i] === "$" && code[i + 1] === "{") {
+      let depth = 1;
+      for (i += 2; i < code.length && depth; i++) {
+        if (code[i] === "{") depth++;
+        else if (code[i] === "}") depth--;
+        else if (code[i] === '"' || code[i] === "'" || code[i] === "`") i = skipString(code, i);
+      }
+      i--;
+    }
+  }
+  return code.length;
 }
 
 const importsOf = (src) => [

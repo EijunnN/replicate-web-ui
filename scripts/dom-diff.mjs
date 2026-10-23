@@ -6,6 +6,7 @@
 //   node dom-diff.mjs --original URL --replica URL [--width 1440] [--tolerance 0.6]
 //        [--original-root main] [--replica-root "[data-slot=app]"] [--limit 80]
 //        [--out dom] [--refresh] [--json result.json]
+//        [--prep "<js for both pages>"] [--replica-prep "<js>"]
 //
 // The original's rows are cached in <out>/cache until `--refresh`. Exit code 1 on any mismatch.
 //
@@ -58,19 +59,22 @@ const collect = (rootSelector) => {
 };
 
 const cacheDir = ensureDir(path.join(args.out ?? "dom", "cache"));
-const cached = path.join(cacheDir, `${cacheKey({ url: args.original, width, root: args["original-root"] ?? "" })}.json`);
+const cached = path.join(cacheDir, `${cacheKey({ url: args.original, width, root: args["original-root"] ?? "", prep: args.prep ?? "" })}.json`);
 let a;
 let originalHeight;
 if (!args.refresh && fs.existsSync(cached)) {
   ({ rows: a, height: originalHeight } = JSON.parse(fs.readFileSync(cached, "utf8")));
 } else {
-  const original = await openPage(browser, args.original, { width, fullHeight: true, wait: 3000 });
+  const original = await openPage(browser, args.original, { width, fullHeight: true, wait: 3000, prep: args.prep });
   a = await original.page.evaluate(collect, args["original-root"]);
   originalHeight = original.height;
   await original.page.close();
   fs.writeFileSync(cached, JSON.stringify({ rows: a, height: originalHeight }));
 }
-const replica = await openPage(browser, args.replica, { width, fullHeight: originalHeight, wait: 3000 });
+// Without prep, a block with a permanent loop is sampled at a different phase on each page
+// and every box differs — the check reports nothing usable and gets dropped from the config.
+const replicaPrep = [args.prep, args["replica-prep"]].filter(Boolean).join(";\n");
+const replica = await openPage(browser, args.replica, { width, fullHeight: originalHeight, wait: 3000, prep: replicaPrep || undefined });
 const b = await replica.page.evaluate(collect, args["replica-root"]);
 await browser.close();
 

@@ -40,6 +40,8 @@ export default {
   // ignoreElements: "noscript, section[aria-label*='Notifications']",
   // ignoreProps: "^(will-change)$",
   // ignoreTokens: "^--font", // theme-leak: next/font hashes its family names
+  // tokens: "^--(bg|bg-elev|fg|fg-muted|border|accent|primary|ring)$", // the original's palette, on the block root
+  // ignorePageProps: "^body\\.cursor$", // env: html/body values you proved never reach the block
 
   // ── A whole page ─────────────────────────────────────────────────────────────────────
   page: {

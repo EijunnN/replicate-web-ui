@@ -96,7 +96,8 @@ verdict to FAIL, and no single check caught them all.
 | Script | What it does |
 |---|---|
 | `setup.mjs` | Prepares a workspace that is kept between sessions and prints its path |
-| **`verify.mjs`** | **The whole verification from one `replica.config.mjs`: runs the checks below, short report, verdict, exit code** |
+| **`verify.mjs`** | **The whole verification from one `replica.config.mjs`: runs the checks below, short report, verdict, exit code; `--self` measures the replica's noise floor** |
+| `page-env.mjs` | What `<html>`/`<body>` paint and pass down, both themes, plus the replica's JS errors: the harness check |
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Splits Turbopack/webpack chunks into modules, finds them by text, follows imports |
 | `behaviour-probe.mjs` | What the original does on its own, on hover and on the keyboard, before you build |
@@ -105,14 +106,14 @@ verdict to FAIL, and no single check caught them all.
 | `css-rules.mjs` | CSS rules from the live CSSOM by selector or by declaration, with @layer/@media context |
 | `tokens.mjs` | Custom properties and typography, light and dark |
 | `icons.mjs` | Exact icon markup and the classes each icon carries |
-| `measure.mjs` | Boxes and computed styles, original vs replica, after actions |
+| `measure.mjs` | Any question about two pages: boxes, computed values, custom properties, attributes, text, the ancestor chain; after config states or actions; at given moments or sampled over time (loop period and shape) |
 | `compare.mjs` | Full-page pixel diff at several widths |
 | `element-diff.mjs` | Pixel diff of one element per page (component inside a bigger page); cached, parallel, position-aligned, with its own "did anything happen" check |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `computed-diff.mjs` | Every computed property of every element, per state — what pixels can't show |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
 | `states.mjs` | Interaction matrix with "did anything happen" checks (`replica.config.example.mjs` to start) |
-| `png-tools.mjs` | PNG diff and zoomed side-by-side crops |
+| `png-tools.mjs` | PNG diff, zoomed side-by-side crops, strongest differing pixels, exact colours, LCD fringe counts |
 | `fingerprint-version.mjs` | Which npm versions of a library contain a code fingerprint |
 
 ## Running the scripts yourself

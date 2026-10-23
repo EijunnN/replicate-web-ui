@@ -44,6 +44,14 @@ already in `ms-playwright` (chromium-1181 ↔ 1.54, 1200 ↔ 1.57).
 Every script prints its usage in its header comment. A value that starts with `--` needs
 the `=` form: `--decl="--foreground:"`.
 
+**Before writing a one-off Playwright script, ask `measure.mjs`.** It reads the config, so
+`measure --config replica.config.mjs --state card-hover --selector "article button" --props
+background-color` probes exactly what verify compares. The first beUI batch left more than forty
+improvised probes in the workspace (box-probe, cmp2, chain, hover-probe, sample-motion,
+loop-compare, selfdiff…), each a few turns to write, debug and read; `measure`, `png-tools` and
+`verify --self` now answer every one of them. When a question really is new, write the probe in
+the project's kit (below), never in the workspace: `setup.mjs` owns that folder.
+
 | Script | Use it to |
 |---|---|
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
@@ -54,18 +62,35 @@ the `=` form: `--decl="--foreground:"`.
 | `css-rules.mjs` | CSS rules from the live CSSOM by selector regex (`--match`) or by declaration (`--decl`) |
 | `tokens.mjs` | Custom properties and typography, light and dark |
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
-| `measure.mjs` | Boxes and computed styles for a selector, original vs replica, after actions |
-| **`verify.mjs`** | **The whole verification from one config: runs the checks below, short report, verdict** |
+| **`measure.mjs`** | **Any question about two pages**: boxes (relative to the root), computed values, `--vars`, `--attrs`, `--text`, the `--ancestors` chain, after `--state` / clicks / keys, `--at` moments or a `--sample`d loop (period, range, shape) |
+| **`verify.mjs`** | **The whole verification from one config: runs the checks below, short report, verdict; `--self` for the noise floor** |
+| `page-env.mjs` | What `<html>`/`<body>` paint and pass down, both themes, and the replica's JS errors: the harness check |
 | `compare.mjs` | Full-page pixel diff at several widths |
 | `element-diff.mjs` | Pixel diff of one element per page (a block inside a bigger page), position-aligned |
 | `dom-diff.mjs` | Per-element box/font/color diff with normalized colors |
 | `states.mjs` | Interaction matrix: same actions on both pages, diffed, with "did anything happen" checks |
 | `computed-diff.mjs` | *Every* computed property of every element, per state — sees what pixels cannot |
 | `theme-leak.mjs` | Theme scales (`--ease-*`, `--radius-*`, `--text-*`) the host redefines under the block |
-| `png-tools.mjs` | Diff two PNGs; zoomed side-by-side crop of a hot cell |
+| `png-tools.mjs` | Diff two PNGs; zoomed side-by-side crop of a hot cell; `top` strongest pixels, `at` exact colours, `fringe` LCD text |
 | `fingerprint-version.mjs` | Which npm versions of a library contain a code fingerprint |
 
 ## Workflow
+
+### Batch work: a kit per site, in the project
+
+Replicating several pages of one site (a gallery, a pro kit) repeats the same discoveries: its
+tokens, its fonts, the frame around each unit, the page's base layer, which install units a page
+lists. Write them down once, **in the project**, as `tools/replicate/<site>/`:
+
+- `BRIEF.md`: the contract every agent reads first, and every correction appended as it is
+  learned (what the frame is, what to freeze, which mistakes of the vendor to port verbatim);
+- the harness template and a `replica.config.mjs` template, with `tokens`, `prep` and the
+  frame in `replicaPrep` already right. Prove it with `verify --only env,env-dark,theme`
+  against the empty harness before the first port;
+- `inventory.mjs`: the site's units and their package names, and any probe you had to write.
+
+Never in the session scratchpad: it is deleted with the session. The first beUI kit lived there
+(a brief forty corrections deep, the harness, the wiring gate) and is gone.
 
 ### 1. Recon
 
@@ -161,12 +186,14 @@ A faithful monolith is only half the job: **make it something a person can reuse
 
 One config, one command. Copy `replica.config.example.mjs`, keep the sections that apply
 (`page` for a whole page, `elements` for a block inside someone else's page, `states` for
-the interaction matrix), and verify against a **production build** of the replica:
+the interaction matrix), name the original's palette in `tokens`, and verify against a
+**production build** of the replica:
 
 ```bash
 node "$WS/verify.mjs" --config replica.config.mjs            # full pass, original from cache
 node "$WS/verify.mjs" --config replica.config.mjs --changed  # after each fix: only what failed
 node "$WS/verify.mjs" --config replica.config.mjs --final    # before delivering: original recaptured
+node "$WS/verify.mjs" --config replica.config.mjs --self     # the replica against itself: its noise floor
 ```
 
 It runs the same checks you could run by hand — pixels at every width and theme, the
@@ -187,10 +214,18 @@ verdict. Read the summary, not the logs; open a log only for the item you are fi
   set only after reading the computed value that proves it.
 - Cover both sides of each breakpoint (1024 and 1023, 768 and 767): a container query
   that is off by the width of a padding only shows at the edge.
+- `env` fails on the page around the block (what `<html>` and `<body>` paint and pass down:
+  surface, font, smoothing, `font-synthesis`, `overflow-x`) and on an uncaught exception in
+  the replica. No pixel check sees a missing `overflow-x: clip` or a replica that throws after
+  rendering: both passed every other check. Fix the harness, not the component.
+- When an item fails and you suspect the page rather than the port, run `--self` before
+  hunting: it points the original at the replica, and whatever differs there (a spring, a
+  composited layer, a loop) is noise to freeze in `prep`, not a difference to fix.
 
-For every failing item: zoom the hot cell with `png-tools.mjs pair`, `measure.mjs` the
-element on both pages, read the relevant source or library code, fix, rebuild,
-`--changed`. `references/verification.md` has the investigation playbook and the traps
+For every failing item: zoom the hot cell with `png-tools.mjs pair` (`top` lists the strongest
+pixels with both colours), `measure.mjs --config … --state <item>` the element on both pages
+(`--ancestors` when the element matches and its rendering does not: the wrapper that creates
+a layer shows there), read the relevant source or library code, fix, rebuild, `--changed`. `references/verification.md` has the investigation playbook and the traps
 that produce false passes and false failures — read it before the first run, because
 several of them are configuration (tall viewports for `whileInView`, freezing loops,
 the position anchor).

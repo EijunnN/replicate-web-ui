@@ -45,6 +45,7 @@ import {
   finish,
   formatDiff,
   fs,
+  goto,
   hidePageChrome,
   launch,
   matchesOnly,
@@ -175,7 +176,7 @@ async function shoot(page, testCase, file) {
 async function runGroup(side, group, phases, widths) {
   const url = side === "original" ? config.original : config.replica;
   const page = await browser.newPage({ viewport: group.viewport });
-  await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+  await goto(page, url);
   if (group.theme === "dark") await setDark(page);
   else await setLight(page);
   const prep = [config.prep, group.prep, side === "replica" ? config.replicaPrep : undefined].filter(Boolean);
