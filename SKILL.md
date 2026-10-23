@@ -64,6 +64,7 @@ the project's kit (below), never in the workspace: `setup.mjs` owns that folder.
 | `icons.mjs` | Exact icon markup and the extra classes each icon carries |
 | **`measure.mjs`** | **Any question about two pages**: boxes (relative to the root), computed values, `--vars`, `--attrs`, `--text`, the `--ancestors` chain, after `--state` / clicks / keys, `--at` moments or a `--sample`d loop (period, range, shape) |
 | **`verify.mjs`** | **The whole verification from one config: runs the checks below, short report, verdict; `--self` for the noise floor** |
+| **`scaffold-harness.mjs`** | **A replica harness for a new site in one command**: Vite + React rendering your packages from source inside the original's own ancestors, its html/body/ancestor CSS verbatim, its font files, its Tailwind theme, pinned deps |
 | `page-env.mjs` | What `<html>`/`<body>` paint and pass down, both themes, and the replica's JS errors: the harness check |
 | `compare.mjs` | Full-page pixel diff at several widths |
 | `element-diff.mjs` | Pixel diff of one element per page (a block inside a bigger page), position-aligned |
@@ -84,9 +85,25 @@ lists. Write them down once, **in the project**, as `tools/replicate/<site>/`:
 
 - `BRIEF.md`: the contract every agent reads first, and every correction appended as it is
   learned (what the frame is, what to freeze, which mistakes of the vendor to port verbatim);
-- the harness template and a `replica.config.mjs` template, with `tokens`, `prep` and the
-  frame in `replicaPrep` already right. Prove it with `verify --only env,env-dark,theme`
-  against the empty harness before the first port;
+- the harness, **generated, not hand-built**:
+
+  ```bash
+  node "$WS/scaffold-harness.mjs" --original <page> --root '<the unit on the original>' \
+    --out tools/replicate/<site>/harness --packages packages/<collection> --scope @<scope> \
+    --unit <name>=@<scope>/<package> [--css @<scope>/tokens/styles.css] [--port 5791]
+  ```
+
+  It copies what a hand-built harness got wrong one correction at a time: the `<html>`/`<body>`
+  attributes, the unit's ancestors from `<body>` down with their attributes, every CSS rule that
+  matches any of them (light and dark, wrappers and layers kept), the site's own font files,
+  a Tailwind v4 theme, and the deps your packages reach at the versions installed beside them.
+  Class rules copied for the ancestors are guarded off the unit (a copied `.w-full` once beat
+  the component's own `@3xl:w-72` and broke its layout while `env` still passed: `env` sees
+  html and body, not what leaks into the block). Read its warnings: an ancestor that lays out
+  siblings it dropped (a grid column beside a sidebar) is yours to check;
+- a `replica.config.mjs` template, with `tokens`, `prep` and the frame in `replicaPrep`
+  already right. Prove it with `verify --only env,env-dark,theme` against the empty harness
+  before the first port;
 - `inventory.mjs`: the site's units and their package names, and any probe you had to write.
 
 Never in the session scratchpad: it is deleted with the session. The first beUI kit lived there
@@ -194,7 +211,28 @@ node "$WS/verify.mjs" --config replica.config.mjs            # full pass, origin
 node "$WS/verify.mjs" --config replica.config.mjs --changed  # after each fix: only what failed
 node "$WS/verify.mjs" --config replica.config.mjs --final    # before delivering: original recaptured
 node "$WS/verify.mjs" --config replica.config.mjs --self     # the replica against itself: its noise floor
+node "$WS/verify.mjs" --config replica.config.mjs --final --resume  # finish a --final that was cut short
 ```
+
+Three things happen without being asked:
+
+- **Preflight.** Before any check, the replica's server answers the page six times and, when it
+  is local, says which processes listen on its port. Two processes on one port (a dev server
+  left over from an earlier run: on Windows both bind, and each answers part of the requests),
+  a dropped request, an 8-second answer among 10 ms ones, or a script that 404s stops the run
+  with `PREFLIGHT FAILED` and the reason. A failed probe is repeated once after 3 s and the
+  first failure is printed either way: a machine still closing the last run's browsers can
+  stall one connection, and a broken server fails twice. That orphan cost most of an hour on the messaging
+  page, read as random diffs. Stop leftover servers yourself: stopping a background task
+  kills its shell, not always the Node server it started.
+- **A fixed clock.** Every page gets a `Date` that starts at the same instant when its document
+  starts and runs at real speed (timers and animations untouched), so a printed "9:41 AM" or
+  "2 min ago" matches between a cached original and a fresh replica. `clock: "<ISO>"` moves
+  it; `clock: false` turns it off for a page that takes its time from the server.
+- **Resumable reports.** The report is saved after each check. `--final --resume` keeps the
+  checks that already passed in that run when the replica's served files, the config, the
+  scripts and the clock are all unchanged and the result is under six hours old; the rest
+  rerun. A session that closes mid-`--final` no longer costs the whole run.
 
 It runs the same checks you could run by hand — pixels at every width and theme, the
 element diff, the DOM diff, the interaction matrix, every computed property per state, the
@@ -218,6 +256,14 @@ verdict. Read the summary, not the logs; open a log only for the item you are fi
   surface, font, smoothing, `font-synthesis`, `overflow-x`) and on an uncaught exception in
   the replica. No pixel check sees a missing `overflow-x: clip` or a replica that throws after
   rendering: both passed every other check. Fix the harness, not the component.
+- `computed` reports nodes "only on the original" at the end of `<body>`: on a Next.js site
+  those are the framework's own (route announcer, React's hidden streaming containers).
+  `framework: "next"` in the config ignores exactly those; never widen `ignoreElements` by hand
+  to make a structural difference go away.
+- A state that only exists for an instant (a message "Sending…", a toast entering, a
+  receipt walking sent → delivered → seen) is not a screenshot state: it races, and its diffs
+  are timing, not design. Measure it as a timeline instead, `measure --at 100,600,1200,2000`
+  on both pages from the same action, and keep the screenshot states for what holds still.
 - When an item fails and you suspect the page rather than the port, run `--self` before
   hunting: it points the original at the replica, and whatever differs there (a spring, a
   composited layer, a loop) is noise to freeze in `prep`, not a difference to fix.

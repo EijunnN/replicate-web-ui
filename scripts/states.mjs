@@ -16,12 +16,11 @@
 // Built to be rerun after every fix: the original's screenshots are cached in <out>/cache
 // (`--refresh` to redo) and states run `--jobs` at a time. Exit code 1 when a state
 // differs or an action had no visible effect.
-import { pathToFileURL } from "node:url";
-import { cacheKey, diffOk, diffPngs, ensureDir, finish, formatDiff, fs, launch, matchesOnly, need, openPage, parseArgs, path, pool, settle } from "./lib.mjs";
+import { cacheKey, diffOk, diffPngs, ensureDir, finish, formatDiff, fs, launch, loadConfig, matchesOnly, need, openPage, parseArgs, path, pool, settle } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
-const config = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
+const config = await loadConfig(args.config);
 const out = ensureDir(args.out ?? path.join(config.out ?? ".", "states"));
 const cacheDir = ensureDir(path.join(out, "cache"));
 const threshold = Number(config.threshold ?? 40);

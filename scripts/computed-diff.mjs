@@ -24,12 +24,12 @@
 // body-level siblings of the root are appended so portaled overlays are compared too.
 // Colors are normalized through a canvas, so oklch/lab/rgb spellings of the same color
 // compare equal; `font-family` is skipped because hashed next/font names never match.
-import { pathToFileURL } from "node:url";
-import { cacheKey, ensureDir, finish, fs, launch, matchesOnly, need, openPage, parseArgs, path, pool, settle } from "./lib.mjs";
+import { cacheKey, ensureDir, finish, fs, ignoredElements, launch, loadConfig, matchesOnly, need, openPage, parseArgs, path, pool, settle } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
-const config = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
+const config = await loadConfig(args.config);
+const ignore = ignoredElements(config);
 const propFilter = args.props ? new RegExp(args.props) : null;
 const out = ensureDir(args.out ?? path.join(config.out ?? ".", "computed"));
 const cacheDir = ensureDir(path.join(out, "cache"));
@@ -108,7 +108,7 @@ async function runState(state) {
   ]) {
     const cached = path.join(
       cacheDir,
-      `${cacheKey({ url, root, state, viewport: state.viewport ?? config.viewport, wait: config.wait ?? 3000, prep: config.prep ?? "", ignoreElements: config.ignoreElements ?? "", ignoreProps: config.ignoreProps ?? "" })}.json`,
+      `${cacheKey({ url, root, state, viewport: state.viewport ?? config.viewport, wait: config.wait ?? 3000, prep: config.prep ?? "", ignoreElements: ignore ?? "", ignoreProps: config.ignoreProps ?? "" })}.json`,
     );
     if (!isReplica && !args.refresh && fs.existsSync(cached)) {
       trees.push(JSON.parse(fs.readFileSync(cached, "utf8")));
@@ -127,7 +127,7 @@ async function runState(state) {
     if (state.run) await state.run(page);
     // A looping or late animation caught mid-flight reads as a page of differences.
     await settle(page, { scope: root });
-    trees.push(await collect(page, root, config.ignoreElements, config.ignoreProps));
+    trees.push(await collect(page, root, ignore, config.ignoreProps));
     await page.close();
     if (!isReplica) fs.writeFileSync(cached, JSON.stringify(trees[0]));
   }

@@ -34,11 +34,10 @@
 //
 // Output: per match, one line when both pages agree ("="), else only the values that differ.
 import fs from "node:fs";
-import { pathToFileURL } from "node:url";
-import { launch, list, openPage, parseArgs, path, setLight, sleep } from "./lib.mjs";
+import { launch, list, loadConfig, openPage, parseArgs, path, setLight, sleep } from "./lib.mjs";
 
 const args = parseArgs();
-const config = args.config ? (await import(pathToFileURL(path.resolve(args.config)).href)).default : {};
+const config = args.config ? await loadConfig(args.config) : {};
 const elements = config.elements ?? {};
 const originalUrl = args.url ?? config.original;
 const replicaUrl = args.replica ?? (args.config ? config.replica : undefined);

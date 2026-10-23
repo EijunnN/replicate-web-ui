@@ -34,7 +34,6 @@
 // and the panel's position relative to its trigger: measure both boxes on each page and
 // compare the offset between them, not the absolute coordinates.
 import crypto from "node:crypto";
-import { pathToFileURL } from "node:url";
 import { PNG } from "pngjs";
 import {
   alignPhase,
@@ -48,6 +47,7 @@ import {
   goto,
   hidePageChrome,
   launch,
+  loadConfig,
   matchesOnly,
   need,
   parseArgs,
@@ -61,7 +61,7 @@ import {
 
 const args = parseArgs();
 need(args, "config");
-const raw = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
+const raw = await loadConfig(args.config);
 const config = { ...raw, ...(raw.elements ?? {}) };
 const out = ensureDir(args.out ?? (raw.elements ? path.join(raw.out ?? ".", "elements") : config.out ?? "elements"));
 const cacheDir = ensureDir(path.join(out, "cache"));

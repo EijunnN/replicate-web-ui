@@ -175,6 +175,24 @@ Examples from the dashboard replica, each found this way:
 
 ## 5. Traps: false failures
 
+- **A server that answers some requests.** A dev server left running from an earlier attempt
+  keeps its port, and on Windows a new server binds the same port beside it: requests go to
+  either, and the failures look like the replica's. verify's preflight catches it (two
+  listeners, a dropped request, erratic answer times, a 404 script) before any check runs.
+  Do not pass `--no-preflight` to get past it; stop the extra process.
+- **The clock.** A page that prints the time ("9:41 AM", "2 min ago", a date) differs from a
+  cached original by however many minutes separate the captures. Every page now gets the same
+  `Date`, starting at one instant and running at real speed. Turn it off (`clock: false`) only
+  for a page that takes its time from the server, and then expect that text to differ.
+- **Analytics that never finish.** pro.beui.dev's analytics left cross-origin requests open
+  forever, so Playwright's `networkidle` passed or timed out by luck (one capture waited 120 s
+  and threw). Navigation now waits for idle on everything that can paint and on every
+  same-origin request, and ignores a cross-origin fetch or beacon only after 5 s in flight.
+- **Transient states.** "Sending…", a toast mid-entry, a receipt that walks sent → delivered →
+  seen: a screenshot state for any of them races, and its diff is timing. Compare them as a
+  timeline (`measure --at 100,600,1200,2000` from the same action on both pages); the messaging
+  receipts matched at six moments that way after failing as screenshot states.
+
 - **A dev server is not the build.** It serializes the same CSS differently (`150ms` vs
   `.15s`, `rgb(0 0 0 / 0.15)` vs `#00000026`, `calc(2.25 / 1.875)` vs `1.2`) and adds
   overlays. `theme-leak.mjs` normalizes those spellings, but verify against a production
@@ -305,6 +323,12 @@ previous report and carries the rest over, marked as such. Two rules keep that h
 A loop run never says PASS — a fix in one place moves another, so the verdict is LOOP
 CLEAN until a full pass confirms it. And the pass you deliver on is `--final`, which
 throws the cache away and recaptures the original.
+
+A `--final` takes minutes, and a session can end in the middle of one. The report is saved after
+every check, and `--final --resume` keeps the checks that run already passed, but only when the
+replica's served files (page, scripts, stylesheets and every module they import), the config,
+the scripts and the clock all hash the same, and the result is under six hours old. Change one
+byte of the replica and everything reruns.
 
 What costs the most is not the run, it is reading its output. The report is about thirty
 lines; the logs are for one item at a time. If a check prints the same cause under every

@@ -13,12 +13,11 @@
 // of `html.<prop>` / `body.<prop>` keys you proved do not reach the block) from the config.
 // An uncaught exception on the replica fails the check; console errors are listed, because
 // a missing favicon is one too.
-import { pathToFileURL } from "node:url";
-import { canonicalValue, finish, launch, need, openPage, parseArgs, path } from "./lib.mjs";
+import { canonicalValue, finish, launch, loadConfig, need, openPage, parseArgs, path } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
-const config = (await import(pathToFileURL(path.resolve(args.config)).href)).default;
+const config = await loadConfig(args.config);
 const dark = !!args.dark;
 const ignore = config.ignorePageProps ? new RegExp(config.ignorePageProps) : null;
 

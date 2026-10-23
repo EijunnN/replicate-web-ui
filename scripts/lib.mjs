@@ -4,6 +4,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 import { PNG } from "pngjs";
 
@@ -50,9 +51,61 @@ export const matchesOnly = (only, name) =>
 export const cacheKey = (parts) =>
   crypto
     .createHash("sha1")
-    .update(JSON.stringify(parts, (_, value) => (typeof value === "function" ? value.toString() : value)))
+    .update(JSON.stringify([parts, clockSetting()], (_, value) => (typeof value === "function" ? value.toString() : value)))
     .digest("hex")
     .slice(0, 12);
+
+/**
+ * The page clock. Every page gets a `Date` that starts at the same fixed instant when its
+ * document starts and runs at real speed from there, so whatever the page prints from the
+ * clock ("9:41 AM", "2 min ago", today's date) is the same on both sides instead of differing
+ * by the minutes between a cached original and a fresh replica. Only `Date` changes: timers,
+ * requestAnimationFrame and performance.now stay real, so animations run as a visitor sees
+ * them. The start sits on a whole minute, which gives a page a minute before a printed "h:mm"
+ * can tick. `clock: "<ISO instant>"` in the config (or REPLICA_CLOCK) picks another start;
+ * `clock: false` (REPLICA_CLOCK=off) keeps the real clock, for a page that reads the time
+ * from its server and would otherwise disagree with itself.
+ */
+export const DEFAULT_CLOCK = "2026-01-15T09:41:00Z";
+export const clockSetting = () => process.env.REPLICA_CLOCK || DEFAULT_CLOCK;
+
+function installClock(start) {
+  const Real = Date;
+  const realNow = Real.now.bind(Real);
+  const offset = start - realNow();
+  const now = () => realNow() + offset;
+  globalThis.Date = new Proxy(Real, {
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length ? args : [now()], newTarget === globalThis.Date ? target : newTarget),
+    apply: () => new Real(now()).toString(),
+    get: (target, key) => (key === "now" ? now : Reflect.get(target, key)),
+  });
+}
+
+/** Imports a replica config and applies the settings that live outside any one script (the clock). */
+export async function loadConfig(file) {
+  const config = (await import(pathToFileURL(path.resolve(file)).href)).default;
+  if (config.clock !== undefined) process.env.REPLICA_CLOCK = config.clock === false ? "off" : String(config.clock);
+  return config;
+}
+
+/**
+ * Nodes a framework puts in the page by itself, with no counterpart in a replica of one
+ * component: `framework: "next"` in the config adds them to `ignoreElements`. Only selectors
+ * seen on a real site are here; add a framework when you have verified its nodes.
+ */
+export const FRAMEWORK_NODES = {
+  // Seen on pro.beui.dev (Next.js 15+, 2026-10-23): the route announcer, the dev overlay's
+  // host, and React's hidden streaming containers left at the end of <body>.
+  next: "next-route-announcer, nextjs-portal, body > div[hidden]",
+};
+
+export function ignoredElements(config) {
+  const presets = list(config.framework).map((name) => {
+    if (!FRAMEWORK_NODES[name]) throw new Error(`framework "${name}" has no node list (known: ${Object.keys(FRAMEWORK_NODES).join(", ")})`);
+    return FRAMEWORK_NODES[name];
+  });
+  return [config.ignoreElements, ...presets].filter(Boolean).join(", ") || undefined;
+}
 
 /** Runs `tasks` (functions returning promises) `size` at a time, results in order. */
 export async function pool(tasks, size) {
@@ -83,7 +136,20 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function launch() {
   try {
-    return await chromium.launch();
+    const browser = await chromium.launch();
+    const clock = clockSetting();
+    if (clock !== "off") {
+      const start = Date.parse(clock);
+      if (Number.isNaN(start)) throw new Error(`clock "${clock}" is not a date: use an ISO instant or false`);
+      // Every page any script opens goes through here, so no script can forget the clock.
+      const newPage = browser.newPage.bind(browser);
+      browser.newPage = async (options) => {
+        const page = await newPage(options);
+        await page.addInitScript(installClock, start);
+        return page;
+      };
+    }
+    return browser;
   } catch (error) {
     if (String(error).includes("Executable doesn't exist")) {
       console.error(
@@ -216,17 +282,50 @@ export async function alignPosition(page, selector, index, target, anchor) {
   );
 }
 
+/** Requests that can change what the page paints, from any origin. */
+const RENDERING = new Set(["document", "stylesheet", "script", "image", "font", "media"]);
+
 /**
- * Navigates, retrying once on a network error (a local server that reset or refused a
- * connection under load). A page that loads and differs is never retried: only the transport.
+ * Navigates and waits until the network is idle (nothing in flight for 500ms), retrying once on
+ * a network error (a local server that reset or refused a connection under load). A page that
+ * loads and differs is never retried: only the transport.
+ * Idle has one exception: a cross-origin request that cannot paint (a fetch, a beacon, a ping)
+ * and has been in flight for 5s. pro.beui.dev's analytics (collect.tracwell.app) left such
+ * requests open forever, and Playwright's own `networkidle` then passed or timed out by luck.
+ * Everything same-origin, and every stylesheet, script, image and font from anywhere, still counts.
  */
 export async function goto(page, url) {
+  const inflight = new Map();
+  const onRequest = (request) => inflight.set(request, Date.now());
+  const onDone = (request) => inflight.delete(request);
+  page.on("request", onRequest);
+  page.on("requestfinished", onDone);
+  page.on("requestfailed", onDone);
   try {
-    await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
-  } catch (error) {
-    if (!/net::ERR_(CONNECTION_(RESET|REFUSED|CLOSED|ABORTED)|EMPTY_RESPONSE)/.test(String(error))) throw error;
-    await sleep(1500);
-    await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
+    try {
+      await page.goto(url, { waitUntil: "load", timeout: 120000 });
+    } catch (error) {
+      if (!/net::ERR_(CONNECTION_(RESET|REFUSED|CLOSED|ABORTED)|EMPTY_RESPONSE)/.test(String(error))) throw error;
+      await sleep(1500);
+      inflight.clear();
+      await page.goto(url, { waitUntil: "load", timeout: 120000 });
+    }
+    const origin = new URL(page.url()).origin;
+    const stuckBeacon = (request, since) =>
+      !RENDERING.has(request.resourceType()) && new URL(request.url()).origin !== origin && Date.now() - since > 5000;
+    const deadline = Date.now() + 120000;
+    let quietSince = null;
+    for (;;) {
+      const busy = [...inflight].filter(([request, since]) => !stuckBeacon(request, since));
+      if (busy.length) quietSince = null;
+      else if ((quietSince ??= Date.now()) <= Date.now() - 500) break;
+      if (Date.now() > deadline) throw new Error(`${url}: the network never went idle; still loading ${busy.slice(0, 5).map(([request]) => request.url()).join(", ")}`);
+      await sleep(50);
+    }
+  } finally {
+    page.off("request", onRequest);
+    page.off("requestfinished", onDone);
+    page.off("requestfailed", onDone);
   }
 }
 

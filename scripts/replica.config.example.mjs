@@ -38,6 +38,8 @@ export default {
   // originalRoot: "body > div.min-h-screen",
   // replicaRoot: BLOCK,
   // ignoreElements: "noscript, section[aria-label*='Notifications']",
+  // framework: "next",        // adds the framework's own body nodes to ignoreElements (lib.mjs FRAMEWORK_NODES)
+  // clock: "2026-01-15T09:41:00Z", // every page's Date starts here and runs at real speed (the default); false = real clock
   // ignoreProps: "^(will-change)$",
   // ignoreTokens: "^--font", // theme-leak: next/font hashes its family names
   // tokens: "^--(bg|bg-elev|fg|fg-muted|border|accent|primary|ring)$", // the original's palette, on the block root

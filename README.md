@@ -96,7 +96,8 @@ verdict to FAIL, and no single check caught them all.
 | Script | What it does |
 |---|---|
 | `setup.mjs` | Prepares a workspace that is kept between sessions and prints its path |
-| **`verify.mjs`** | **The whole verification from one `replica.config.mjs`: runs the checks below, short report, verdict, exit code; `--self` measures the replica's noise floor** |
+| **`scaffold-harness.mjs`** | **Generates the replica harness for a new site: Vite + React rendering your packages from source inside the original's ancestors, with its html/body/ancestor CSS, font files and Tailwind theme copied verbatim** |
+| **`verify.mjs`** | **The whole verification from one `replica.config.mjs`: runs the checks below, short report, verdict, exit code; a server preflight first, a fixed page clock, `--self` for the replica's noise floor, `--resume` to finish an interrupted run** |
 | `page-env.mjs` | What `<html>`/`<body>` paint and pass down, both themes, plus the replica's JS errors: the harness check |
 | `capture.mjs` | Full-page screenshot, all JS/CSS/HTML responses, stack fingerprint, "settled?" check |
 | `bundle-modules.mjs` | Splits Turbopack/webpack chunks into modules, finds them by text, follows imports |
@@ -128,6 +129,7 @@ cp "$WS/replica.config.example.mjs" replica.config.mjs     # set the URLs and th
 node "$WS/verify.mjs" --config replica.config.mjs          # full pass
 node "$WS/verify.mjs" --config replica.config.mjs --changed  # after each fix: only what failed
 node "$WS/verify.mjs" --config replica.config.mjs --final    # before delivering: original recaptured
+node "$WS/verify.mjs" --config replica.config.mjs --final --resume  # finish one that was cut short
 ```
 
 It installs Chromium with `PLAYWRIGHT_SKIP_BROWSER_GC=1`: without it, `playwright install`

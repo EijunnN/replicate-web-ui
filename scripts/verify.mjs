@@ -6,7 +6,8 @@
 //   node verify.mjs --config replica.config.mjs            full pass (original from cache)
 //   node verify.mjs --config replica.config.mjs --changed  only what failed last time
 //   node verify.mjs --config replica.config.mjs --final    full pass, original recaptured
-//        [--only states,computed] [--jobs 4] [--refresh]
+//   node verify.mjs --config replica.config.mjs --final --resume   finish a --final that was cut short
+//        [--only states,computed] [--jobs 4] [--refresh] [--no-preflight]
 //   node verify.mjs --config replica.config.mjs --self     the replica against itself: its noise floor
 //
 // Which checks run (override with `checks: [...]` in the config):
@@ -23,23 +24,195 @@
 // pixel and computed checks: whatever differs there is the page differing from itself (an
 // unsettled spring, composited text, a loop), to freeze before any diff against the original
 // means anything. It writes to <out>/self and never touches the real report.
+// `--resume` (with --final or a full pass) keeps the checks an interrupted run of the same mode
+// already passed, when nothing they depend on changed: the replica's served files, the config,
+// these scripts and the clock (see "Fingerprint"). Everything else reruns in full.
+//
+// Before any check, a preflight asks the replica's server (and the original's, when it is
+// about to be recaptured) for the page six times in a row and, for a local server, which
+// processes listen on its port. A server that drops or stalls a request, or two processes on
+// one port (an orphaned dev server keeps answering part of the requests), fails right there,
+// with the reason, instead of surfacing as diffs that look like the replica's fault.
+// `--no-preflight` skips it (and with it --resume, which needs its fingerprint).
 // Exit code 0 on PASS / LOOP CLEAN / a clean noise floor, 1 otherwise.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ensureDir, fs, need, parseArgs, path } from "./lib.mjs";
+import { clockSetting, ensureDir, fs, loadConfig, need, parseArgs, path } from "./lib.mjs";
 
 const args = parseArgs();
 need(args, "config");
 const here = path.dirname(fileURLToPath(import.meta.url));
 let configPath = path.resolve(args.config);
 if (args.self) configPath = writeSelfConfig(configPath);
-const config = (await import(pathToFileURL(configPath).href)).default;
+// loadConfig puts the config's clock in the environment, which every check inherits.
+const config = await loadConfig(configPath);
 const out = ensureDir(config.out ?? "verify");
 const logs = ensureDir(path.join(out, "logs"));
 const reportFile = path.join(out, "report.json");
 const previous = fs.existsSync(reportFile) ? JSON.parse(fs.readFileSync(reportFile, "utf8")) : null;
 // The self test's "original" is the replica, which changes between runs: never from cache.
 const refresh = args.refresh || args.final || args.self;
+const mode = args.self ? "self" : args.final ? "final" : args.changed ? "changed" : "full";
+if (args.resume && (args.changed || args.only)) {
+  console.error("--resume completes an interrupted full or --final run; --changed and --only already rerun only part of one.");
+  process.exit(1);
+}
+
+// ── Preflight ─────────────────────────────────────────────────────────────────────────
+const isLocal = (url) => ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(new URL(url).hostname);
+
+/** The processes listening on a local port, as "pid name" strings, or null when the OS will not say. */
+function listeners(port) {
+  try {
+    if (process.platform === "win32") {
+      const script = `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { "$_ " + (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName }`;
+      return execFileSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8", timeout: 20000 }).split(/\r?\n/).filter(Boolean);
+    }
+    const pids = execFileSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8", timeout: 20000 }).split("\n").filter(Boolean);
+    return [...new Set(pids)].map((pid) => `${pid} ${execFileSync("ps", ["-o", "comm=", "-p", pid], { encoding: "utf8" }).trim()}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One GET with node:http and `autoSelectFamily: false`. On a busy Windows machine, connections to
+ * a healthy 127.0.0.1 server failed with ETIMEDOUT after ~315ms, through fetch and through plain
+ * node:http alike: the signature of Node's 250ms per-attempt family-selection timeout, which a
+ * browser does not have. Here only a real error or 20s of silence fails.
+ */
+function fetchTimed(url, redirects = 3) {
+  const started = Date.now();
+  const { protocol } = new URL(url);
+  return new Promise((resolve) => {
+    const done = (result) => resolve({ ms: Date.now() - started, ...result });
+    import(protocol === "https:" ? "node:https" : "node:http").then(({ get }) => {
+      const request = get(url, { autoSelectFamily: false, headers: { "cache-control": "no-cache", "user-agent": "Mozilla/5.0 replicate-web-ui preflight" } }, (response) => {
+        const { statusCode = 0, headers } = response;
+        if (statusCode >= 300 && statusCode < 400 && headers.location && redirects > 0) {
+          response.resume();
+          fetchTimed(new URL(headers.location, url).href, redirects - 1).then((result) => resolve({ ...result, ms: Date.now() - started }));
+          return;
+        }
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => done({ ok: statusCode >= 200 && statusCode < 300, status: statusCode, body: Buffer.concat(chunks), type: headers["content-type"] ?? "" }));
+        response.on("error", (error) => done({ ok: false, status: error.code ?? String(error) }));
+      });
+      request.setTimeout(20000, () => request.destroy(Object.assign(new Error("no answer in 20s"), { code: "TIMEOUT" })));
+      request.on("error", (error) => done({ ok: false, status: error.code ?? String(error) }));
+    });
+  });
+}
+
+/**
+ * Every same-origin script and stylesheet the page reaches: the tags in the HTML, then the
+ * static and dynamic imports inside each script, so a lazy chunk or a dev server's untouched
+ * entry still changes the fingerprint when a module deep in the tree does.
+ */
+async function servedFiles(pageUrl, html) {
+  const origin = new URL(pageUrl).origin;
+  const seen = new Map();
+  const queue = [];
+  const enqueue = (ref, base) => {
+    if (!ref || /^(data|blob|javascript):/.test(ref)) return;
+    const url = new URL(ref, base);
+    if (url.origin !== origin) return;
+    const key = url.href.split("#")[0];
+    if (!seen.has(key) && seen.size < 600) {
+      seen.set(key, null);
+      queue.push(key);
+    }
+  };
+  for (const match of html.matchAll(/<(?:script|link)\b[^>]*?\b(?:src|href)=["']([^"']+)["'][^>]*>/gi)) {
+    if (/<link/i.test(match[0]) && !/rel=["']?(stylesheet|modulepreload|preload)/i.test(match[0])) continue;
+    enqueue(match[1], pageUrl);
+  }
+  while (queue.length) {
+    const url = queue.shift();
+    const response = await fetchTimed(url);
+    seen.set(url, response);
+    if (!response.ok || !/javascript|ecmascript/.test(response.type)) continue;
+    const source = response.body.toString("utf8");
+    for (const match of source.matchAll(/(?:\bimport\s*\(?|\bfrom)\s*["'`]([^"'`]+\.(?:m?js|jsx?|tsx?|css)(?:\?[^"'`]*)?)["'`]/g)) enqueue(match[1], url);
+  }
+  return seen;
+}
+
+async function probe(url, { strictTiming }) {
+  const problems = [];
+  const notes = [];
+  const runs = [];
+  for (let i = 0; i < 6; i++) runs.push(await fetchTimed(url));
+  for (const run of runs) if (!run.ok) problems.push(`request answered ${run.status} after ${run.ms}ms`);
+  const times = runs.map((run) => run.ms).sort((a, b) => a - b);
+  const median = times[Math.floor(times.length / 2)];
+  // A healthy server answers the same page in about the same time. One that answers in 20ms and
+  // then in 8s is dropping requests on the floor: the 5481 orphan did exactly this.
+  if (strictTiming && times.at(-1) > 3000 && times.at(-1) > median * 5) problems.push(`answers erratically: ${times.join(", ")} ms for the same page`);
+  notes.push(`${url}  6 requests, ${times[0]}–${times.at(-1)} ms`);
+  const { port, protocol } = new URL(url);
+  if (isLocal(url)) {
+    const owners = listeners(port || (protocol === "https:" ? 443 : 80));
+    if (owners === null) notes.push("  (could not read which process listens on the port)");
+    else if (owners.length > 1) problems.push(`${owners.length} processes listen on port ${port}: ${owners.join(", ")} — one is probably a server left over from an earlier run; stop the one you did not just start`);
+    else if (owners.length) notes.push(`  port ${port}: pid ${owners[0]}`);
+  }
+  const page = runs.find((run) => run.ok);
+  let files = new Map();
+  if (page) {
+    files = await servedFiles(url, page.body.toString("utf8"));
+    const broken = [...files].filter(([, response]) => !response?.ok);
+    for (const [file, response] of broken.slice(0, 5)) problems.push(`${file} answered ${response?.status ?? "nothing"}`);
+    notes.push(`  ${files.size} scripts and stylesheets reachable`);
+  }
+  // The page plus everything it loads, by content: the replica's half of the fingerprint.
+  const hash = crypto.createHash("sha1");
+  hash.update(page?.body ?? "");
+  for (const [file, response] of [...files].sort(([a], [b]) => a.localeCompare(b))) hash.update(file).update(response?.body ?? "");
+  return { problems, notes, hash: hash.digest("hex").slice(0, 16) };
+}
+
+let replicaHash = null;
+if (!args["no-preflight"]) {
+  const targets = [[config.replica, true], ...(refresh && !args.self ? [[config.original, false]] : [])];
+  const failures = [];
+  for (const [url, strictTiming] of targets) {
+    let result = await probe(url, { strictTiming: strictTiming && isLocal(url) });
+    if (result.problems.length) {
+      // Once more after a pause: right after a run closes its browsers, a loaded machine can stall
+      // one connection (2 runs in 24 on the fixture). A broken server fails again; a stall does not.
+      // The first failure stays in the output either way.
+      for (const problem of result.problems) process.stderr.write(`· first probe: ${problem} — probing again\n`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      result = await probe(url, { strictTiming: strictTiming && isLocal(url) });
+    }
+    for (const note of result.notes) process.stderr.write(`· ${note}\n`);
+    failures.push(...result.problems.map((problem) => `${url}: ${problem}`));
+    if (url === config.replica) replicaHash = result.hash;
+  }
+  if (failures.length) {
+    console.log([...failures.map((failure) => `PREFLIGHT ${failure}`), "", "VERDICT: PREFLIGHT FAILED — fix the server before reading any diff (no check ran)"].join("\n"));
+    process.exit(1);
+  }
+}
+
+// ── Fingerprint ───────────────────────────────────────────────────────────────────────
+// What a check's result depends on besides the original: the replica as served, the config as
+// written, the checking scripts, and the clock. `--resume` keeps a result only when all four match.
+const fingerprint = replicaHash && {
+  replica: replicaHash,
+  config: crypto.createHash("sha1").update(fs.readFileSync(path.resolve(args.config))).digest("hex").slice(0, 16),
+  scripts: crypto
+    .createHash("sha1")
+    .update(fs.readdirSync(here).filter((file) => file.endsWith(".mjs")).sort().map((file) => fs.readFileSync(path.join(here, file), "utf8")).join("\0"))
+    .digest("hex")
+    .slice(0, 16),
+  clock: clockSetting(),
+};
+// A recaptured original older than this is not "the original" any more: sites change under us.
+const RESUME_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
  * A config whose original is the replica: same URL, selectors, indexes, roots, and the
@@ -143,13 +316,32 @@ function run(check, extra) {
   });
 }
 
-const report = { mode: args.final ? "final" : args.changed ? "changed" : "full", at: new Date().toISOString(), checks: [] };
+const report = { mode, at: new Date().toISOString(), fingerprint, complete: false, checks: [] };
+const results = new Map();
+// Written after every check, not only at the end: a run cut short (a closed session, a killed
+// terminal) leaves what it finished, which is what --resume picks up.
+const saveReport = () => {
+  report.checks = wanted.map((check) => results.get(check)).filter(Boolean);
+  fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
+};
+
+/** A previous result --resume may keep: same mode, same fingerprint, passed whole, recent enough. */
+function resumable(check) {
+  if (!args.resume || !fingerprint || previous?.mode !== mode) return null;
+  if (JSON.stringify(previous.fingerprint) !== JSON.stringify(fingerprint)) return null;
+  const before = previous.checks.find((entry) => entry.check === check);
+  if (!before || !before.ok || before.crashed || before.partial || before.carried || !before.items.every((item) => item.ok)) return null;
+  const ranAt = before.ranAt ?? previous.at;
+  return Date.now() - Date.parse(ranAt) <= RESUME_MAX_AGE_MS ? { ...before, ranAt, resumed: true } : null;
+}
 // Checks that read values, not pixels, run beside the screenshot checks instead of after them.
 // Screenshot checks stay one at a time, as before: they wait for stillness, and two of them
 // animating at once on a loaded machine is a source of noise nobody should have to rule out.
 const valueChecks = new Set(["env", "env-dark", "theme", "theme-dark", "dom"]);
 const runOne = async (check) => {
   if (args.only && !String(args.only).split(",").includes(check)) return null;
+  const kept = resumable(check);
+  if (kept) return kept;
   const before = previous?.checks.find((entry) => entry.check === check);
   let extra = [];
   if (args.changed && before && !before.crashed) {
@@ -162,7 +354,7 @@ const runOne = async (check) => {
     }
   }
   process.stderr.write(`· ${check}…\n`);
-  const result = await run(check, extra);
+  const result = { ...(await run(check, extra)), ranAt: new Date().toISOString() };
   if (extra.length && before) {
     // Items that passed last time were not rerun: keep them, marked as carried over.
     const fresh = new Map(result.items.map((item) => [item.name, item]));
@@ -172,17 +364,21 @@ const runOne = async (check) => {
   }
   return result;
 };
-const results = new Map();
+const record = (check, result) => {
+  if (!result) return;
+  results.set(check, result);
+  saveReport();
+};
 // One value check at a time beside the screenshot checks: more browsers than that at once made a
 // local server reset connections, and a crash reads as a failure.
 const valueRuns = (async () => {
-  for (const check of wanted.filter((check) => valueChecks.has(check))) results.set(check, await runOne(check));
+  for (const check of wanted.filter((check) => valueChecks.has(check))) record(check, await runOne(check));
 })();
-for (const check of wanted.filter((check) => !valueChecks.has(check))) results.set(check, await runOne(check));
+for (const check of wanted.filter((check) => !valueChecks.has(check))) record(check, await runOne(check));
 await valueRuns;
 // Report in the declared order, whatever finished first.
-for (const check of wanted) if (results.get(check)) report.checks.push(results.get(check));
-fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
+report.complete = true;
+saveReport();
 
 // ── Report ────────────────────────────────────────────────────────────────────────────
 const lines = [];
@@ -192,7 +388,9 @@ for (const entry of report.checks) {
   const status = entry.crashed ? "ERROR" : entry.ok && !failing.length ? "ok" : "FAIL";
   const scope = entry.carried
     ? "carried over, not rerun"
-    : `${entry.items.length - failing.length}/${entry.items.length} ok, ${entry.seconds}s${entry.partial ? ", failing items only" : ""}`;
+    : entry.resumed
+      ? `${entry.items.length}/${entry.items.length} ok, resumed: passed at ${entry.ranAt.slice(11, 16)} UTC on the same replica, config and scripts`
+      : `${entry.items.length - failing.length}/${entry.items.length} ok, ${entry.seconds}s${entry.partial ? ", failing items only" : ""}`;
   const crash = `did not finish — read ${path.join(logs, `${entry.check}.log`)}`;
   lines.push(`${status.padEnd(5)} ${entry.check.padEnd(13)} ${entry.crashed ? crash : scope}`);
   if (entry.check === "computed") {
@@ -235,6 +433,8 @@ for (const entry of report.checks) {
   if (failing.length > 6) lines.push(`        … ${failing.length - 6} more in ${path.join(logs, `${entry.check}.log`)}`);
 }
 const clean = report.checks.length > 0 && report.checks.every((entry) => entry.ok && !entry.crashed && entry.items.every((item) => item.ok));
+const resumedCount = report.checks.filter((entry) => entry.resumed).length;
+const resumedNote = resumedCount ? `; ${resumedCount} check(s) resumed from an earlier run of the same replica` : "";
 const verdict = args.self
   ? clean
     ? "NOISE FLOOR CLEAN — the replica matches itself, so a difference against the original is real"
@@ -242,9 +442,9 @@ const verdict = args.self
   : !clean
   ? "FAIL"
   : args.final && full
-    ? "PASS (final: every check, original recaptured)"
+    ? `PASS (final: every check, original recaptured${resumedNote})`
     : full
-      ? "PASS on a cached original — run --final before delivering"
+      ? `PASS on a cached original — run --final before delivering${resumedNote}`
       : "LOOP CLEAN — not a pass: run the full verification (no --changed / --only)";
 lines.push("", `VERDICT: ${verdict}`, `details: ${logs}  ·  images: ${out}/<check>/diff-*.png`);
 fs.writeFileSync(path.join(out, "summary.txt"), `${lines.join("\n")}\n`);
